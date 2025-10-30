@@ -1,0 +1,1468 @@
+# Chain-of-Custody Framework - Complete Implementation Plan for AI Agent
+
+---
+
+## PART 1: FRAMEWORK CORE ENHANCEMENTS
+
+### Task 1.1: Add Children Tracking to CoCNode
+
+**Objective:** Enable efficient tree/graph traversal by maintaining bidirectional parent-child relationships.
+
+**Implementation Steps:**
+1. Add `children` attribute as empty list to CoCNode initialization
+2. Add `depth` attribute as integer (0 for root, parent.depth + 1 for children)
+3. Remove `chain_position` string attribute (replaced by depth)
+4. Create `add_child()` method that:
+   - Appends child to parent's children list
+   - Sets child's parent_hash to parent's message_hash
+   - Calculates and sets child's depth
+5. Create `get_all_descendants()` method that:
+   - Recursively collects all children
+   - Returns flat list of all descendant nodes
+   - Uses depth-first traversal
+6. Update CoCNode `__repr__` to show depth instead of chain_position
+
+**Files to Modify:**
+- `coc_framework/core/coc_engine.py`
+
+**Validation:**
+- Parent node contains child in children list
+- Child node has correct parent_hash
+- Depth increases by 1 for each level
+- get_all_descendants returns correct count for complex graphs
+
+---
+
+### Task 1.2: Update CoCEngine to Maintain Parent-Child Links
+
+**Objective:** Ensure all forward operations maintain bidirectional graph structure.
+
+**Implementation Steps:**
+1. Modify `add_forward_node()` method to:
+   - Call `parent_node.add_child(new_node)` after creating new node
+   - Verify parent exists in nodes dictionary before adding
+2. Ensure `create_root_node()` sets depth to 0
+3. Add helper method `get_node_by_hash()` for safe node retrieval
+4. Add method `get_all_roots()` to find nodes with no parent
+5. Add method `get_depth_statistics()` for debugging (min/max/avg depth)
+
+**Files to Modify:**
+- `coc_framework/core/coc_engine.py`
+
+**Validation:**
+- Forward creates proper parent-child link
+- Multiple children supported per parent
+- No dangling references (all children have valid parent_hash)
+
+---
+
+### Task 1.3: Optimize Deletion Propagation Algorithm
+
+**Objective:** Replace O(n) search with O(1) tree traversal using children list.
+
+**Implementation Steps:**
+1. In `simulation_engine.py` DELETE_MESSAGE handler:
+   - Start with root node from message_id_to_hash
+   - Call root_node.get_all_descendants() once (O(tree_height))
+   - Collect all unique peer IDs from root and descendants
+   - Remove the O(n) loop that searches all nodes
+2. Add deletion statistics tracking:
+   - Count of peers notified
+   - Count of online vs offline peers
+   - Count of orphaned branches (if any remain)
+3. Update audit log to record deletion propagation metrics
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Deletion visits only nodes in actual chain (not all nodes)
+- Performance test: 1000 nodes chain should complete in <1 second
+- All recipients in tree receive deletion token
+
+---
+
+### Task 1.4: Implement Offline Message Queue
+
+**Objective:** Store messages for offline peers and deliver on reconnection.
+
+**Implementation Steps:**
+1. Add to Peer class initialization:
+   - `offline_queue` as empty list
+   - `last_online_timestamp` as current time
+   - `message_ttl_hours` as configurable parameter (default 24)
+2. Create `go_offline()` method that:
+   - Sets online flag to False
+   - Records timestamp of going offline
+   - Logs event to console
+3. Create `go_online()` method that:
+   - Sets online flag to True
+   - Iterates through offline_queue
+   - Checks each message age against TTL
+   - Processes valid messages via receive_message()
+   - Removes expired messages
+   - Clears queue after processing
+   - Logs statistics (processed vs expired)
+4. Update `Network.route_message()` to:
+   - Check if recipient is online
+   - If online: deliver immediately (existing behavior)
+   - If offline: create queue entry with message and timestamp
+   - Append to recipient's offline_queue
+   - Log queuing event
+5. Update SimulationEngine event handlers:
+   - PEER_OFFLINE: call peer.go_offline()
+   - PEER_ONLINE: call peer.go_online()
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Offline peer accumulates messages in queue
+- Online peer processes all queued messages
+- Expired messages (>TTL) are discarded
+- Queue clears after processing
+
+---
+
+### Task 1.5: Add Signature Verification to Deletion Processing
+
+**Objective:** Validate deletion tokens aren't forged before processing.
+
+**Implementation Steps:**
+1. Modify `DeletionEngine.process_token()` to:
+   - Accept originator's verify_key as parameter
+   - Reconstruct token data string (msg_hash + originator_id + timestamp)
+   - Convert signature from hex string to bytes
+   - Call CryptoCore.verify_signature() with verify_key, data, signature
+   - Raise exception if verification fails
+   - Only proceed with deletion if signature valid
+2. Update caller in `Peer.receive_message()` to:
+   - Look up originator peer by peer_id
+   - Get originator's verify_key
+   - Pass verify_key to process_token()
+3. Add try-catch handling:
+   - Log verification failures to audit log
+   - Don't crash simulation, just skip invalid tokens
+4. Add test cases for:
+   - Valid tokens (should process)
+   - Invalid signature (should reject)
+   - Tampered timestamp (should reject)
+   - Wrong originator (should reject)
+
+**Files to Modify:**
+- `coc_framework/core/deletion_engine.py`
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- Valid tokens accepted and processed
+- Forged tokens rejected without deleting
+- Audit log shows verification attempts
+
+---
+
+## PART 2: FRAMEWORK UTILITIES INTEGRATION
+
+### Task 2.1: Initialize WatermarkEngine in SimulationEngine
+
+**Objective:** Make watermarking available for all message operations.
+
+**Implementation Steps:**
+1. Import WatermarkEngine at top of simulation_engine.py
+2. In SimulationEngine.__init__:
+   - Create WatermarkEngine instance with secret key
+   - Store as self.watermark_engine
+   - Use scenario-specific secret or default
+3. Add configuration option in scenario.json:
+   - `settings.watermark_secret_key` (optional)
+   - Default to fixed key for testing
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- WatermarkEngine accessible in all event handlers
+- No initialization errors
+
+---
+
+### Task 2.2: Embed Watermarks on Message Creation
+
+**Objective:** Automatically watermark all new messages with originator metadata.
+
+**Implementation Steps:**
+1. In CREATE_MESSAGE event handler:
+   - After creating root_node via coc_engine
+   - Extract original content from event
+   - Call watermark_engine.embed_watermark() with:
+     - content: original message content
+     - peer_id: originator's peer_id
+     - chain_position: 0 (use depth instead)
+     - message_hash: root_node.message_hash
+   - Replace root_node.message_content with watermarked version
+   - Log watermark embed event to audit log
+2. Update audit log entry to include:
+   - Event type: WATERMARK_EMBED
+   - Actor: originator peer_id
+   - Target: message_hash
+   - Details: depth/position information
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Created messages contain watermark section
+- Watermark includes correct originator peer_id
+- Original content preserved before watermark
+
+---
+
+### Task 2.3: Update Watermarks on Message Forwarding
+
+**Objective:** Replace forwarder's watermark while preserving original content.
+
+**Implementation Steps:**
+1. In FORWARD_MESSAGE event handler:
+   - Get parent_node from parent_message_id
+   - Call watermark_engine.extract_and_verify_watermark():
+     - Input: parent_node.message_content
+     - Output: original_content, old_watermark_metadata
+   - If extraction fails (no watermark), use content as-is
+   - Create new_node via add_forward_node with original_content
+   - Call watermark_engine.embed_watermark() with:
+     - content: original_content (without old watermark)
+     - peer_id: sender's peer_id
+     - chain_position: new_node.depth
+     - message_hash: new_node.message_hash
+   - Replace new_node.message_content with new watermarked version
+   - Log watermark forward event with both old and new peer_ids
+2. Handle watermark verification failures:
+   - Log tampering detection
+   - Continue with content (don't block forward)
+   - Mark in audit log as potentially tampered
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Forwarded messages have forwarder's watermark
+- Original content unchanged (only watermark replaced)
+- Watermark metadata shows chain progression
+
+---
+
+### Task 2.4: Add Watermark Configuration to Peer
+
+**Objective:** Allow per-peer watermark enable/disable and tracking preferences.
+
+**Implementation Steps:**
+1. Add to Peer class initialization:
+   - `watermark_enabled` boolean (default True)
+   - `track_forwards` boolean (default True)
+   - `notify_on_forward` boolean (default False)
+2. Check watermark_enabled before embedding:
+   - In CREATE_MESSAGE: if originator.watermark_enabled
+   - In FORWARD_MESSAGE: if sender.watermark_enabled
+   - Skip watermarking if disabled
+3. Add support in scenario.json:
+   - New event type: SET_PEER_SETTINGS
+   - Fields: peer_idx, watermark_enabled, track_forwards
+4. Create event handler for SET_PEER_SETTINGS:
+   - Update peer's watermark settings
+   - Log settings change to audit
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Peers with watermark_enabled=False create unwatermarked messages
+- Settings persist across events
+- Can be changed mid-simulation
+
+---
+
+## PART 3: FRAMEWORK HOOKS AND INTERFACES
+
+### Task 3.1: Create Abstract StorageBackend Interface
+
+**Objective:** Define contract for application-level storage implementations.
+
+**Implementation Steps:**
+1. Create new file `coc_framework/interfaces/storage_backend.py`
+2. Define abstract base class StorageBackend:
+   - Abstract method: save_message(msg_hash, content, metadata)
+   - Abstract method: get_message(msg_hash) returns content or None
+   - Abstract method: delete_message(msg_hash) returns boolean
+   - Abstract method: list_messages(peer_id) returns list of hashes
+   - Abstract method: message_exists(msg_hash) returns boolean
+3. Create default implementation InMemoryStorage:
+   - Uses dictionary to store messages
+   - Provides simple reference implementation
+4. Update Peer class to use StorageBackend:
+   - Replace direct message_store dictionary access
+   - Inject storage_backend in __init__ (defaults to InMemoryStorage)
+   - All message operations go through storage_backend
+5. Update documentation explaining:
+   - Applications can inherit StorageBackend
+   - Override methods for custom storage (database, cloud, encrypted)
+   - Framework remains storage-agnostic
+
+**Files to Create:**
+- `coc_framework/interfaces/__init__.py`
+- `coc_framework/interfaces/storage_backend.py`
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- InMemoryStorage works identically to old message_store
+- Can swap storage backends without breaking simulation
+- Abstract methods enforce interface contract
+
+---
+
+### Task 3.2: Create Abstract TransferMonitor Interface
+
+**Objective:** Provide hooks for applications to detect message transfers/access.
+
+**Implementation Steps:**
+1. Create new file `coc_framework/interfaces/transfer_monitor.py`
+2. Define abstract base class TransferMonitor:
+   - Abstract method: on_message_accessed(msg_hash, peer_id, access_type)
+   - Abstract method: on_transfer_attempt(msg_hash, peer_id, destination)
+   - Abstract method: should_allow_transfer(msg_hash, peer_id) returns boolean
+   - Abstract method: get_encryption_policy(msg_hash, peer_id) returns enum
+3. Define TransferAccessType enum:
+   - READ: Message content viewed
+   - COPY: Message copied to clipboard
+   - SAVE: Message saved to storage
+   - FORWARD: Message forwarded to peer
+4. Define EncryptionPolicy enum:
+   - ALLOW: No encryption on transfer
+   - KNOWN_KEY: Encrypt with recoverable key
+   - UNKNOWN_KEY: Encrypt with random key (burn)
+5. Create default NullTransferMonitor:
+   - Allows all transfers
+   - No encryption
+   - Provides no-op implementation
+6. Update Peer class:
+   - Inject transfer_monitor in __init__
+   - Call on_message_accessed when message retrieved
+   - Emit events but don't enforce (framework provides hooks only)
+
+**Files to Create:**
+- `coc_framework/interfaces/transfer_monitor.py`
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- Framework emits correct events at right times
+- Applications can observe all message access
+- Default monitor doesn't break existing behavior
+
+---
+
+### Task 3.3: Create Abstract EncryptionPolicy Interface
+
+**Objective:** Allow applications to define encryption behavior for transfers.
+
+**Implementation Steps:**
+1. Create new file `coc_framework/interfaces/encryption_policy.py`
+2. Define abstract base class EncryptionPolicy:
+   - Abstract method: get_policy_for_peer(peer_id) returns EncryptionMode enum
+   - Abstract method: encrypt_for_transfer(content, peer_id, mode) returns bytes
+   - Abstract method: can_decrypt(encrypted_content, peer_id) returns boolean
+   - Abstract method: decrypt_if_allowed(encrypted_content, peer_id) returns content or None
+3. Define EncryptionMode enum:
+   - NONE: No encryption
+   - RECOVERABLE: Known key encryption
+   - IRRECOVERABLE: Unknown key (one-way)
+4. Create default NoEncryption implementation:
+   - Returns content unchanged
+   - Always allows decryption
+5. Add support for AIRGAP_TRANSFER event in scenario.json:
+   - Fields: time, type, peer_idx, message_id, encryption_mode
+6. Create event handler for AIRGAP_TRANSFER:
+   - Get peer's encryption policy
+   - Call encrypt_for_transfer via policy interface
+   - Update message content with encrypted version
+   - Log event with encryption mode used
+
+**Files to Create:**
+- `coc_framework/interfaces/encryption_policy.py`
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- AIRGAP_TRANSFER event triggers encryption
+- Encryption mode from scenario respected
+- Known key mode preserves recoverability
+- Unknown key mode makes content unrecoverable
+
+---
+
+### Task 3.4: Create Abstract NotificationHandler Interface
+
+**Objective:** Emit events for applications to notify users.
+
+**Implementation Steps:**
+1. Create new file `coc_framework/interfaces/notification_handler.py`
+2. Define abstract base class NotificationHandler:
+   - Abstract method: on_message_received(peer_id, msg_hash, sender_id)
+   - Abstract method: on_message_forwarded(peer_id, msg_hash, recipients)
+   - Abstract method: on_deletion_requested(peer_id, msg_hash, originator_id)
+   - Abstract method: on_peer_status_changed(peer_id, online_status)
+   - Abstract method: on_queue_processed(peer_id, message_count)
+3. Create default SilentNotificationHandler:
+   - Logs events to console only
+   - No actual notifications
+4. Update SimulationEngine:
+   - Inject notification_handler in __init__
+   - Call appropriate methods at key events:
+     - After message received in Peer
+     - After message forwarded
+     - When deletion token issued
+     - When peer goes online/offline
+     - After processing offline queue
+
+**Files to Create:**
+- `coc_framework/interfaces/notification_handler.py`
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- All key events trigger notifications
+- Applications can capture events
+- Default handler doesn't break simulation
+
+---
+
+### Task 3.5: Create Abstract PeerDiscovery Interface
+
+**Objective:** Allow applications to implement peer finding mechanisms.
+
+**Implementation Steps:**
+1. Create new file `coc_framework/interfaces/peer_discovery.py`
+2. Define abstract base class PeerDiscovery:
+   - Abstract method: find_peer(peer_id) returns Peer object or None
+   - Abstract method: register_peer(peer) returns success boolean
+   - Abstract method: unregister_peer(peer_id) returns success boolean
+   - Abstract method: list_online_peers() returns list of peer_ids
+   - Abstract method: get_peer_status(peer_id) returns online boolean
+3. Create default RegistryPeerDiscovery:
+   - Uses in-memory dictionary
+   - Simple lookup by peer_id
+4. Update Network class:
+   - Inject peer_discovery in __init__
+   - Use discovery to find peers instead of direct dictionary
+   - Allows applications to use DHT, DNS, or other discovery
+
+**Files to Create:**
+- `coc_framework/interfaces/peer_discovery.py`
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- Network can find peers through discovery interface
+- Default registry works like old dictionary
+- Interface supports external implementations
+
+---
+
+## PART 4: CLEANUP AND REFACTORING
+
+### Task 4.1: Remove Tree-Specific Code
+
+**Objective:** Clean up code designed for binary tree that's now using graph structure.
+
+**Implementation Steps:**
+1. Remove from CoCNode:
+   - `is_orphaned` attribute
+   - `mark_as_orphaned()` method
+   - Any split branch logic references
+   - `chain_position` string notation (replaced by `depth`)
+2. Update all references to chain_position:
+   - Replace with `depth` integer
+   - Update watermark calls to use depth
+   - Update audit log to log depth instead
+3. Search codebase for:
+   - "orphan" keyword - remove related code
+   - "split branch" comments - remove
+   - "chain_position" - replace with depth
+4. Update docstrings to reflect graph structure:
+   - Change "tree" references to "graph"
+   - Update method descriptions
+   - Fix outdated comments
+
+**Files to Modify:**
+- `coc_framework/core/coc_engine.py`
+- `coc_framework/simulation_engine.py`
+- `coc_framework/core/watermark_engine.py`
+
+**Validation:**
+- No references to removed attributes
+- All tests pass after removal
+- Code cleaner and easier to understand
+
+---
+
+### Task 4.2: Remove Unused Inbox Attribute
+
+**Objective:** Remove inbox that was defined but never used.
+
+**Implementation Steps:**
+1. Remove from Peer.__init__:
+   - `self.inbox = []` line
+2. Search entire codebase for "inbox" references:
+   - Remove any unused code
+   - Verify message_store is consistently used
+3. Update any comments mentioning inbox:
+   - Clarify that message_store is the storage mechanism
+
+**Files to Modify:**
+- `coc_framework/core/network_sim.py`
+
+**Validation:**
+- No broken references after removal
+- All message operations use message_store
+
+---
+
+### Task 4.3: Refactor Content Storage (Best Practice)
+
+**Objective:** Move full message content out of CoCNode, keep only metadata.
+
+**Implementation Steps:**
+1. Update CoCNode to NOT store message_content:
+   - Remove self.message_content attribute
+   - Keep only message_hash, sender_id, receiver_ids, timestamp, signature
+   - CoCNode becomes pure metadata/chain tracking
+2. Store actual content in StorageBackend:
+   - When message created: storage_backend.save_message(hash, content)
+   - When message needed: storage_backend.get_message(hash)
+   - When message deleted: storage_backend.delete_message(hash)
+3. Update all code that accessed node.message_content:
+   - Get hash from node
+   - Retrieve content from storage
+   - Two-step lookup: node for metadata, storage for content
+4. Benefits of this approach:
+   - Separates chain tracking from content storage
+   - Content can be encrypted/compressed independently
+   - CoC graph stays lightweight
+   - Applications control content lifetime
+5. Update watermarking to work with storage:
+   - Watermark when saving to storage
+   - Extract when loading from storage
+   - CoCNode never sees watermarked content
+
+**Files to Modify:**
+- `coc_framework/core/coc_engine.py`
+- `coc_framework/core/network_sim.py`
+- `coc_framework/simulation_engine.py`
+- `coc_framework/core/watermark_engine.py`
+
+**Validation:**
+- CoCNode size reduced (metadata only)
+- Content retrieval still works correctly
+- Watermarking functions properly
+- Storage abstraction enables encryption/compression
+
+---
+
+### Task 4.4: Fix Signature Method Consistency
+
+**Objective:** Ensure all cryptographic operations use consistent signature format.
+
+**Implementation Steps:**
+1. Verify CryptoCore.sign_message():
+   - Returns only signature bytes (not signed_message wrapper)
+   - Currently returns signing_key.sign().signature ✓
+2. Verify CryptoCore.verify_signature():
+   - Takes verify_key, message string, signature bytes
+   - Reconstructs message bytes internally
+   - Returns boolean
+3. Update all callers to match:
+   - DeletionToken.sign() - already correct
+   - DeletionReceipt.sign() - already correct
+   - CoCNode signature - verify format
+4. Ensure signature storage:
+   - Always store as bytes
+   - Convert to hex string only for JSON serialization
+   - Convert back to bytes for verification
+5. Add helper methods if needed:
+   - signature_to_hex(signature_bytes)
+   - hex_to_signature(hex_string)
+
+**Files to Modify:**
+- `coc_framework/core/crypto_core.py` (if needed)
+- `coc_framework/core/coc_engine.py`
+- `coc_framework/core/deletion_engine.py`
+
+**Validation:**
+- All signatures verifiable
+- No format conversion errors
+- Consistent hex encoding
+
+---
+
+## PART 5: TESTING IMPLEMENTATION
+
+### Task 5.1: Unit Tests for Children Tracking
+
+**Objective:** Verify parent-child relationships work correctly.
+
+**Test Cases:**
+1. Test parent knows about child after add_child()
+2. Test child knows about parent (parent_hash set)
+3. Test multiple children per parent
+4. Test depth calculation (root=0, child=1, grandchild=2)
+5. Test get_all_descendants with linear chain
+6. Test get_all_descendants with branching tree
+7. Test get_all_descendants with complex graph
+8. Test circular reference prevention (if applicable)
+
+**Files to Create:**
+- `tests/test_tree_structure.py` (extend existing or create new)
+
+---
+
+### Task 5.2: Unit Tests for Offline Queue
+
+**Objective:** Verify offline message queuing and delivery.
+
+**Test Cases:**
+1. Test message queued when peer offline
+2. Test message delivered when peer comes online
+3. Test multiple messages queued correctly
+4. Test message order preserved in queue
+5. Test TTL expiration (old messages discarded)
+6. Test queue cleared after processing
+7. Test offline peer accumulates queue across multiple events
+8. Test deletion token queued for offline peer
+9. Test deletion token processed on reconnection
+
+**Files to Create/Modify:**
+- `tests/test_offline_queue.py`
+- `tests/test_deletion_engine.py` (add offline tests)
+
+---
+
+### Task 5.3: Unit Tests for Signature Verification
+
+**Objective:** Verify cryptographic signatures correctly validated.
+
+**Test Cases:**
+1. Test valid deletion token accepted
+2. Test invalid signature rejected
+3. Test tampered message_hash rejected
+4. Test tampered originator_id rejected
+5. Test tampered timestamp rejected
+6. Test wrong signer's key rejected
+7. Test deletion receipt signature verification
+8. Test CoCNode signature verification
+
+**Files to Create/Modify:**
+- `tests/test_signature_verification.py`
+- `tests/test_deletion_engine.py` (add verification tests)
+
+---
+
+### Task 5.4: Unit Tests for Watermark Integration
+
+**Objective:** Verify watermarks embedded and extracted correctly.
+
+**Test Cases:**
+1. Test watermark embedded on message creation
+2. Test watermark contains correct peer_id
+3. Test watermark contains correct depth
+4. Test watermark extraction returns original content
+5. Test watermark verification detects tampering
+6. Test forward replaces watermark
+7. Test forward preserves original content
+8. Test watermark disabled peer creates unwatermarked message
+9. Test watermark chain (multiple forwards)
+
+**Files to Create:**
+- `tests/test_watermark_integration.py`
+
+---
+
+### Task 5.5: Integration Tests
+
+**Objective:** Test complete scenarios end-to-end.
+
+**Test Scenarios:**
+1. Full lifecycle: create → forward → offline → delete → reconnect
+2. Complex graph: one sender, five recipients, three levels deep
+3. Graph merging: three senders forward to same recipient
+4. Loop detection: A→B→C→A cycle doesn't cause infinite propagation
+5. Offline during deletion: deletion queued and delivered later
+6. Watermark chain: verify each forward updates watermark
+7. Large scale: 100 peers, 500 messages, 50 deletions
+8. Stress test: rapid create/delete cycles (100 operations)
+9. Concurrent forwards: multiple peers forward same message simultaneously
+
+**Files to Create/Modify:**
+- `tests/test_integration.py`
+- `tests/test_scenarios.py`
+
+---
+
+### Task 5.6: Performance Tests
+
+**Objective:** Verify framework performs adequately at scale.
+
+**Test Cases:**
+1. Deletion propagation time: 1000 node chain in <1 second
+2. Message creation rate: 1000 messages/second
+3. Forward throughput: 500 forwards/second
+4. Queue processing: 1000 queued messages in <2 seconds
+5. Memory usage: graph with 10000 nodes uses <500MB
+6. Signature verification overhead: <10ms per verification
+
+**Files to Create:**
+- `tests/test_performance.py`
+
+---
+
+## PART 6: SCENARIO ENHANCEMENTS
+
+### Task 6.1: Update Event Format for Multiple Recipients
+
+**Objective:** Standardize recipient specification across all events.
+
+**Implementation Steps:**
+1. Update CREATE_MESSAGE event:
+   - Change `recipient_idx` to `recipient_indices` (list)
+   - Support both formats for backward compatibility
+   - If recipient_idx provided, convert to [recipient_idx]
+2. Update FORWARD_MESSAGE event:
+   - Change `recipient_idx` to `recipient_indices` (list)
+   - Support backward compatibility
+3. Add validation:
+   - Ensure recipient_indices is list
+   - Ensure all indices valid (< total_peers)
+   - Ensure at least one recipient
+4. Update example scenarios in documentation
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Validation:**
+- Old format scenarios still work
+- New format supports multiple recipients
+- Validation catches invalid indices
+
+---
+
+### Task 6.2: Add New Event Types
+
+**Objective:** Support new framework features in scenarios.
+
+**New Event Types:**
+1. SET_PEER_SETTINGS:
+   - Fields: time, type, peer_idx, watermark_enabled, track_forwards
+   - Updates peer's configuration mid-simulation
+2. AIRGAP_TRANSFER:
+   - Fields: time, type, peer_idx, message_id, encryption_mode
+   - Simulates transfer to external storage
+3. VERIFY_WATERMARK:
+   - Fields: time, type, peer_idx, message_id
+   - Tests watermark extraction and verification
+
+**Implementation Steps:**
+1. Add event handlers in simulation_engine.py
+2. Update scenario.json schema documentation
+3. Create example scenarios demonstrating each event
+4. Add validation for new event fields
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+**Files to Create:**
+- Example scenario files for each event type
+
+---
+
+### Task 6.3: Add Scenario Configuration Options
+
+**Objective:** Make scenarios more configurable.
+
+**Configuration Options to Add:**
+1. settings.watermark_secret_key: Custom watermark signing key
+2. settings.default_ttl_hours: Default message TTL (default 24)
+3. settings.enable_signatures: Global signature verification toggle
+4. settings.default_watermark_enabled: Default for new peers
+5. settings.log_level: Control verbosity (ERROR, INFO, DEBUG)
+
+**Implementation Steps:**
+1. Update scenario.json schema
+2. Load settings in SimulationEngine.__init__
+3. Apply settings to appropriate components
+4. Provide sensible defaults for all settings
+5. Validate settings on load (types, ranges)
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+---
+
+### Task 6.4: Create Migration Script
+
+**Objective:** Convert old scenario format to new format.
+
+**Implementation Steps:**
+1. Create script `migrate_scenario.py`
+2. Load old scenario.json
+3. Transform:
+   - recipient_idx → recipient_indices: [idx]
+   - Add default settings if missing
+   - Update event structure if needed
+4. Write new scenario.json (backup old file)
+5. Report changes made
+6. Validate new scenario loads correctly
+
+**Files to Create:**
+- `migrate_scenario.py`
+
+---
+
+## PART 7: DOCUMENTATION UPDATES
+
+### Task 7.1: Update Main README.md
+
+**Objective:** Comprehensive framework explanation in layman terms.
+
+**Documentation Sections:**
+1. Overview:
+   - What is Chain-of-Custody
+   - Why this framework exists
+   - Real-world use cases
+2. How It Works (Theory):
+   - Graph-based message tracking
+   - Cryptographic signatures for authenticity
+   - Source-controlled deletion
+   - Watermarking for leak attribution
+   - Offline peer handling
+3. Key Features:
+   - List all framework capabilities
+   - List provided utilities
+   - List application hooks/interfaces
+4. Architecture:
+   - Core components diagram
+   - Data flow explanation
+   - Graph structure visualization
+5. Quick Start:
+   - Installation steps
+   - Running first simulation
+   - Understanding output
+6. Scenario Configuration:
+   - How to write scenarios
+   - Event types reference
+   - Configuration options
+7. Extending the Framework:
+   - Implementing StorageBackend
+   - Implementing TransferMonitor
+   - Implementing EncryptionPolicy
+   - Other interfaces
+8. API Reference:
+   - Core classes
+   - Interface contracts
+   - Utility methods
+9. Testing:
+   - Running tests
+   - Writing new tests
+   - Performance testing
+10. FAQ and Troubleshooting
+
+**Files to Modify:**
+- `README.md`
+
+---
+
+### Task 7.2: Additional Documentation (Lower Priority)
+
+**Objective:** Comprehensive documentation suite for advanced users.
+
+**Documentation to Create:**
+1. Developer Guide (`docs/DEVELOPER_GUIDE.md`):
+   - Framework internals deep-dive
+   - Best practices for extension
+   - Common implementation patterns
+   - Integration examples
+2. API Reference (`docs/API_REFERENCE.md`):
+   - Complete class and method documentation
+   - Interface contracts
+   - Parameter and return type specifications
+   - Usage examples for each API
+3. Scenario Writing Guide (`docs/SCENARIO_GUIDE.md`):
+   - Event types reference
+   - Scenario structure explanation
+   - Common scenario patterns
+   - Troubleshooting guide
+4. Inline Documentation:
+   - Add docstrings to all classes
+   - Add docstrings to all public methods
+   - Update inline comments
+   - Follow consistent documentation style (Google/NumPy format)
+5. Examples Directory:
+   - Basic usage examples
+   - Custom storage backend examples
+   - Transfer monitoring examples
+   - Integration examples
+   - Testing examples
+
+**Files to Create:**
+- `docs/DEVELOPER_GUIDE.md`
+- `docs/API_REFERENCE.md`
+- `docs/SCENARIO_GUIDE.md`
+- `examples/` directory with multiple example files
+
+**Files to Modify:**
+- All `.py` files (add/update docstrings)
+
+---
+
+---
+
+## PART 10: ADVANCED FEATURES (OPTIONAL ENHANCEMENTS)
+
+### Task 10.1: Add Graph Visualization Export
+
+**Objective:** Export CoC graph in standard formats for visualization.
+
+**Implementation Steps:**
+---
+
+## PART 10: ADVANCED FEATURES (OPTIONAL ENHANCEMENTS)
+
+### Task 10.1: Add Graph Visualization Export
+
+**Objective:** Export CoC graph in standard formats for visualization tools.
+
+**Implementation Steps:**
+1. Create GraphExporter utility class
+2. Implement export methods:
+   - export_to_dot() for Graphviz visualization
+   - export_to_json() for D3.js/web visualization
+   - export_to_graphml() for analysis tools
+3. Include node metadata in exports:
+   - Peer IDs
+   - Message hashes
+   - Timestamps
+   - Depth/position
+   - Online status
+4. Include edge metadata:
+   - Forward relationships
+   - Timestamps
+   - Watermark information
+5. Add export command to SimulationEngine:
+   - Call after simulation complete
+   - Save to output directory
+   - Support multiple formats simultaneously
+
+**Files to Create:**
+- `coc_framework/utils/graph_exporter.py`
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+- `scenario_runner.py` (add export flag)
+
+---
+
+### Task 10.2: Add Metrics and Statistics Collection
+
+**Objective:** Collect simulation metrics for analysis.
+
+**Implementation Steps:**
+1. Create MetricsCollector class
+2. Track metrics:
+   - Total messages created
+   - Total forwards
+   - Total deletions
+   - Average chain depth
+   - Maximum chain depth
+   - Offline queue statistics
+   - Deletion propagation time
+   - Signature verification count
+   - Watermark operations
+3. Compute graph statistics:
+   - Number of root nodes
+   - Number of leaf nodes
+   - Branching factor distribution
+   - Graph diameter
+   - Average path length
+4. Export metrics:
+   - JSON format for programmatic access
+   - CSV format for spreadsheet analysis
+   - Human-readable summary report
+5. Add visualization of metrics:
+   - Generate simple charts (matplotlib)
+   - Export as PNG/SVG
+   - Timeline of events
+
+**Files to Create:**
+- `coc_framework/utils/metrics_collector.py`
+
+**Files to Modify:**
+- `coc_framework/simulation_engine.py`
+
+---
+
+### Task 10.3: Add Interactive Mode
+
+**Objective:** Allow manual step-through of simulation for debugging.
+
+**Implementation Steps:**
+1. Create InteractiveRunner class
+2. Implement interactive commands:
+   - step: advance one tick
+   - run: run until specific tick
+   - inspect: view peer/message details
+   - graph: show current graph state
+   - stats: display statistics
+   - export: export current state
+   - quit: exit simulation
+3. Add REPL-style interface:
+   - Command prompt
+   - Command history
+   - Auto-completion
+   - Help system
+4. Real-time state inspection:
+   - View any peer's state
+   - View any message details
+   - Query graph structure
+5. Breakpoint support:
+   - Break on event type
+   - Break on peer action
+   - Break on condition
+
+**Files to Create:**
+- `interactive_runner.py`
+
+---
+
+### Task 10.4: Add Scenario Validation Tool
+
+**Objective:** Validate scenarios before running simulation.
+
+**Implementation Steps:**
+1. Create ScenarioValidator class
+2. Validation checks:
+   - JSON syntax valid
+   - Required fields present
+   - Field types correct
+   - Peer indices in range
+   - Message IDs referenced exist
+   - Event times logical (monotonic)
+   - No circular dependencies
+   - Settings values reasonable
+3. Report validation errors:
+   - Error type and location
+   - Suggested fixes
+   - Warning vs critical errors
+4. Add validation command:
+   - Run validator standalone
+   - Integrate into simulation startup
+   - Option to skip validation (fast mode)
+
+**Files to Create:**
+- `coc_framework/utils/scenario_validator.py`
+- `validate_scenario.py` (CLI tool)
+
+---
+
+### Task 10.5: Add Comparative Analysis Tool
+
+**Objective:** Compare results across multiple simulation runs.
+
+**Implementation Steps:**
+1. Create ComparisonTool class
+2. Compare features:
+   - Deletion propagation time across scenarios
+   - Queue sizes across scenarios
+   - Graph structures across scenarios
+   - Performance metrics across scenarios
+3. Generate comparison reports:
+   - Side-by-side tables
+   - Difference highlighting
+   - Statistical significance tests
+4. Visualization:
+   - Overlay graphs from multiple runs
+   - Plot metrics over time
+   - Histogram comparisons
+
+**Files to Create:**
+- `coc_framework/utils/comparison_tool.py`
+- `compare_scenarios.py` (CLI tool)
+
+---
+
+## PART 11: FINAL INTEGRATION AND VERIFICATION
+
+### Task 11.1: End-to-End Integration Test
+
+**Objective:** Verify all components work together correctly.
+
+**Test Scope:**
+1. Run complete simulation with all features enabled:
+   - Children tracking
+   - Offline queue
+   - Signature verification
+   - Watermarking
+   - All interfaces
+2. Verify results:
+   - All events processed correctly
+   - Audit log integrity maintained
+   - No data corruption
+   - Performance acceptable
+3. Test with complex scenarios:
+   - 1000 peers
+   - 10000 messages
+   - Multiple offline/online cycles
+   - Complex graph structures
+4. Verify exports:
+   - Graph exports valid
+   - Metrics accurate
+   - Audit log complete
+
+**Files to Create:**
+- `tests/test_e2e_integration.py`
+
+---
+
+### Task 11.2: Regression Test Suite
+
+**Objective:** Ensure changes don't break existing functionality.
+
+**Test Coverage:**
+1. All existing tests still pass
+2. Performance hasn't degraded:
+   - Benchmark key operations
+   - Compare against baseline
+   - Fail if >10% slower
+3. Memory usage acceptable:
+   - No memory leaks
+   - Reasonable memory footprint
+4. Backward compatibility:
+   - Old scenarios work
+   - Output format unchanged
+   - API contracts maintained
+
+**Files to Create:**
+- `tests/test_regression.py`
+- `tests/benchmarks.py`
+
+---
+
+### Task 11.3: Documentation Review
+
+**Objective:** Ensure documentation accurate and complete.
+
+**Review Checklist:**
+1. README.md:
+   - Accurate feature descriptions
+   - Working installation instructions
+   - Valid example commands
+   - Updated architecture diagrams
+2. Code documentation:
+   - All public APIs documented
+   - Docstrings accurate
+   - Examples work
+3. Additional docs:
+   - No broken links
+   - Examples executable
+   - Consistent terminology
+4. Version information:
+   - CHANGELOG.md updated
+   - Version numbers consistent
+   - Deprecation notices clear
+
+**Validation:**
+- Build documentation locally
+- Test all code examples
+- Verify links work
+- Check for typos/grammar
+
+---
+
+### Task 11.4: Security Audit
+
+**Objective:** Verify cryptographic implementation secure.
+
+**Audit Areas:**
+1. Signature verification:
+   - All tokens verified before use
+   - Verification failures handled correctly
+   - No bypasses possible
+2. Key management:
+   - Keys generated securely
+   - Private keys protected
+   - Public keys shared safely
+3. Hash functions:
+   - SHA-256 used correctly
+   - No collision vulnerabilities
+   - Content integrity maintained
+4. Randomness:
+   - Cryptographically secure random used
+   - No predictable values
+5. Timing attacks:
+   - Constant-time comparisons where needed
+   - No timing side channels
+
+**Validation:**
+- Review all crypto operations
+- Test with invalid inputs
+- Attempt common attacks
+- Document security assumptions
+
+---
+
+### Task 11.5: Performance Optimization
+
+**Objective:** Ensure framework performs efficiently.
+
+**Optimization Areas:**
+1. Graph traversal:
+   - Verify O(1) children lookup working
+   - Cache computed values where appropriate
+   - Avoid redundant traversals
+2. Memory usage:
+   - Content stored efficiently
+   - No memory leaks
+   - Reasonable memory footprint
+3. Signature operations:
+   - Batch verification if possible
+   - Cache verification results
+   - Avoid redundant signing
+4. Queue processing:
+   - Efficient queue data structures
+   - Bulk processing where possible
+   - TTL checks optimized
+
+**Validation:**
+- Profile with large scenarios
+- Identify bottlenecks
+- Optimize hot paths
+- Re-benchmark after optimization
+
+---
+
+### Task 11.6: Final Code Review
+
+**Objective:** Code quality and consistency check.
+
+**Review Areas:**
+1. Code style:
+   - Consistent formatting
+   - Follows PEP 8
+   - No unused imports
+   - No dead code
+2. Error handling:
+   - Exceptions caught appropriately
+   - Error messages helpful
+   - No silent failures
+3. Logging:
+   - Consistent log levels
+   - Informative messages
+   - No spam in normal operation
+4. Type hints:
+   - All functions typed
+   - Types accurate
+   - MyPy passes
+5. Tests:
+   - Adequate coverage (>80%)
+   - Tests meaningful
+   - No flaky tests
+
+**Validation:**
+- Run all linters
+- Run type checker
+- Run test suite
+- Manual code review
+
+---
+
+## PART 12: RELEASE PREPARATION
+
+### Task 12.1: Version Bump and Tagging
+
+**Objective:** Prepare for version 2.0.0 release.
+
+**Steps:**
+1. Update version numbers:
+   - `coc_framework/__version__.py`: "2.0.0"
+   - `setup.py`: version="2.0.0"
+   - Documentation references
+2. Update CHANGELOG.md:
+   - Document all changes
+   - Breaking changes section
+   - New features section
+   - Bug fixes section
+   - Migration guide
+3. Create git tag:
+   - Tag: v2.0.0
+   - Annotated tag with release notes
+   - Push tag to remote
+
+---
+
+### Task 12.2: Build and Test Package
+
+**Objective:** Verify package builds correctly.
+
+**Steps:**
+1. Build source distribution:
+   - Run: python setup.py sdist
+   - Verify contents
+2. Build wheel distribution:
+   - Run: python setup.py bdist_wheel
+   - Verify contents
+3. Test installation:
+   - Install in clean virtualenv
+   - Run tests from installed package
+   - Verify all imports work
+4. Test with pip:
+   - Install from local wheel
+   - Verify dependencies installed
+   - Run sample code
+
+---
+
+### Task 12.3: Release Announcement
+
+**Objective:** Communicate release to users.
+
+**Announcements:**
+1. GitHub Release:
+   - Release notes from CHANGELOG
+   - Download links
+   - Installation instructions
+2. Update README badges:
+   - Version badge
+   - Build status
+   - Coverage status
+3. Migration guide:
+   - Document breaking changes
+   - Provide upgrade path
+   - Link to examples
+
+---
+
+## SUMMARY: TASK EXECUTION ORDER
+
+### Phase 1: Core Framework (Must Complete)
+1. Task 1.1-1.3: Children tracking and optimization
+2. Task 1.4: Offline queue
+3. Task 1.5: Signature verification
+4. Task 4.1-4.4: Cleanup and refactoring
+
+### Phase 2: Utilities Integration (Must Complete)
+1. Task 2.1-2.4: Watermarking integration
+2. Task 6.1-6.3: Scenario enhancements
+
+### Phase 3: Interfaces (Must Complete)
+1. Task 3.1-3.5: All abstract interfaces
+
+### Phase 4: Testing (Must Complete)
+1. Task 5.1-5.6: All tests
+
+### Phase 5: Documentation (High Priority)
+1. Task 7.1: Main README update
+2. Task 7.2: Additional documentation (lower priority)
+
+### Phase 6: Deployment (Must Complete)
+1. Task 8.1-8.3: Backward compatibility
+2. Task 9.1-9.3: Package and CI/CD
+3. Task 11.1-11.6: Integration and verification
+4. Task 12.1-12.3: Release preparation
+
+### Phase 7: Advanced Features (Optional)
+1. Task 9.4: Docker support
+2. Task 10.1-10.5: Advanced features
+
+---
+
+## IMPLEMENTATION NOTES FOR AI AGENT
+
+### General Guidelines
+1. Work systematically through phases in order
+2. Complete all validation steps for each task
+3. Run tests after each major change
+4. Commit code frequently with clear messages
+5. Document all design decisions
+6. Flag ambiguities for human review
+
+### Quality Standards
+1. All code must pass linters (flake8, black)
+2. All code must have type hints (mypy clean)
+3. All public APIs must have docstrings
+4. Test coverage must be >80%
+5. All tests must pass before proceeding
+
+### Error Handling
+1. If task unclear, flag for clarification
+2. If breaking change needed, document why
+3. If performance issue found, document and flag
+4. If security concern found, flag immediately
+
+### Testing Protocol
+1. Write tests before implementation (TDD)
+2. Test happy path and error cases
+3. Test edge cases and boundary conditions
+4. Test integration between components
+5. Run full test suite before completing task
+
+### Documentation Protocol
+1. Update inline documentation as code changes
+2. Update README for user-facing changes
+3. Update API docs for interface changes
+4. Add examples for new features
+5. Keep CHANGELOG current
+
+---
+
+## DELIVERABLES
+
+Upon completion, the framework will have:
+
+✅ **Core Features:**
+- Efficient graph-based CoC tracking with O(1) traversal
+- Robust offline message queue with TTL
+- Cryptographic signature verification
+- Integrated watermarking system
+- Clean separation of concerns
+
+✅ **Extensibility:**
+- Abstract interfaces for storage, monitoring, encryption
+- Plugin architecture for applications
+- Well-documented extension points
+
+✅ **Quality:**
+- >80% test coverage
+- Type-safe code with mypy
+- Comprehensive documentation
+- Performance benchmarks
+- Security audit
+
+✅ **Usability:**
+- Easy installation via pip
+- Clear examples and tutorials
+- Migration guide for v1.x users
+- Interactive debugging mode
+
+✅ **Production Ready:**
+- CI/CD pipeline
+- Docker support
+- Versioned releases
+- Backward compatibility
+
+---
+
+**END OF IMPLEMENTATION PLAN**

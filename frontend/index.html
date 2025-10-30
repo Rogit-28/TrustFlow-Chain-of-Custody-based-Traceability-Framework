@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoC Privacy Framework Simulator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Chain-of-Custody Privacy Framework Simulator</h1>
+    <div id="simulation-container">
+        <div id="network-graph"></div>
+        <div id="controls">
+            <button id="play-btn">Play</button>
+            <button id="pause-btn">Pause</button>
+            <button id="step-btn">Step Forward</button>
+            <button id="reset-btn">Reset</button>
+        </div>
+    </div>
+    <div id="node-details">
+        <h2>Node Details</h2>
+        <pre id="details-content">Click on a node to see its details.</pre>
+    </div>
+    <script src="https://visjs.github.io/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
