@@ -1,0 +1,124 @@
+# Implementation Plan: Chat, Topology, and Recycle Bin
+
+## Decisions Locked
+
+| Feature | Decision |
+|---|---|
+| Chat + Threads | **Merge** into unified conversation with reply chains |
+| Topology | **Two views**: My Network (user-scoped) + File Trace (per-doc) |
+| Non-owner visibility | **Flat access list** — see below for rationale |
+| Delete | **Recycle Bin** with restore options |
+
+---
+
+## 1. Unified Conversation
+
+Merge Live Chat + Threads into one panel in the document drawer.
+
+### Backend Changes
+
+#### [MODIFY] [chat.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/chat.py)
+- Add `parent_message_id` field to message model (nullable → reply chain)
+- Add `is_pinned` field (boolean, default false)
+- WebSocket broadcasts include `parent_message_id` so clients can render threads inline
+
+#### [DELETE] [comments.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/comments.py)
+- Remove — functionality absorbed into unified messages
+
+#### [MODIFY] [database.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/database.py)
+- Remove `comments` table from schema and `_mem` dict
+- Add `parent_message_id` and `is_pinned` columns to `messages`
+
+### Frontend Changes
+
+#### [MODIFY] [Workspace.jsx](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs-ui/src/views/Workspace.jsx)
+- Replace two-tab drawer with single conversation feed
+- Messages with `parent_message_id` render as indented reply chains
+- "Reply" button on each message sets parent context
+- Remove Threads tab entirely
+
+---
+
+## 2. CoC Topology: Two Views
+
+### Non-Owner Visibility — My Recommendation
+
+> [!IMPORTANT]
+> **Non-owners should see a flat access list, NOT the full share tree.**
+
+**Rationale**: In a chain-of-custody system, the sharing topology itself is sensitive metadata. If Alice shares with Bob, and Bob re-shares with Charlie — should Charlie know that Bob was the intermediary? In most enterprise/legal scenarios, **no**. The chain of custody is the *owner's* forensic record.
+
+**What non-owners see**: "This document is shared with: bob, charlie, dave" (flat list, no edges)
+**What owners see**: Full tree with who-shared-to-whom edges
+
+This also aligns with TrustFlow's watermarking model — the owner can trace leaks via watermarks, so only they need the topology.
+
+### Backend Changes
+
+#### [MODIFY] [admin.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/admin.py)
+- New: `GET /admin/graph/me` — user-scoped graph (all files I own/received + their share edges)
+- Existing `GET /admin/graph` becomes admin-only (global compliance view)
+
+#### [NEW] `GET /documents/{id}/trace`
+- Add to [routes.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/documents/routes.py)
+- Owner: returns full tree (nodes + edges)
+- Non-owner: returns flat recipient list (nodes only, no edges)
+
+### Frontend Changes
+
+#### [MODIFY] [AdminDashboard.jsx](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs-ui/src/views/AdminDashboard.jsx)
+- Replace single graph with tabbed view: **"My Network"** | **"File Trace"**
+- My Network: vis-network graph from `/admin/graph/me`
+- File Trace: dropdown to select a doc → renders per-doc tree from `/documents/{id}/trace`
+- Add legend component (diamond=root, circle=share, green/gray=online/offline)
+
+---
+
+## 3. Recycle Bin
+
+Replace hard delete with soft-delete + recycle bin. Owner can restore with two options.
+
+### State Machine
+
+```mermaid
+stateDiagram-v2
+    active --> recycled: Move to Bin
+    recycled --> active: Restore (with access)
+    recycled --> active: Restore (fresh, 0 access)
+    recycled --> purged: Permanent Delete
+    note right of recycled: All shares suspended\nFiles remain on disk\n30-day auto-purge
+```
+
+### Backend Changes
+
+#### [MODIFY] [routes.py](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs/documents/routes.py)
+- `DELETE /{doc_id}` → changes status to `"recycled"` (not `"deleted"`)
+- All shares get status `"suspended"` (not `"revoked"`)
+- File stays on disk
+- New: `POST /{doc_id}/restore` with body `{"restore_access": true|false}`
+  - `true`: reactivate all suspended shares
+  - `false`: keep shares suspended (fresh start, 0 access)
+- New: `DELETE /{doc_id}/purge` — permanent delete (removes file, revokes shares permanently)
+- New: `GET /documents/recycled` — list recycled docs for owner
+
+### Frontend Changes
+
+#### [MODIFY] [Workspace.jsx](file:///c:/Users/rogit/dev/Trustflow-local-dev/TrustFlow-Chain-of-Custody-based-Traceability-Framework/trustdocs-ui/src/views/Workspace.jsx)
+- Add "Recycle Bin" section/tab below "Shared With Me"
+- Recycled cards show muted/faded with 🗑️ icon
+- Action buttons: "Restore (with access)" | "Restore (fresh)" | "Purge"
+- Delete button on active cards now says "Move to Bin"
+
+---
+
+## Verification Plan
+
+### Automated
+- Re-run `/tmp/qa_test.py` with updated endpoints
+- Test restore-with-access and restore-fresh flows
+- Test non-owner topology visibility
+
+### Manual
+- Verify unified chat renders reply chains correctly in the drawer
+- Verify topology legend and two-view switching
+- Verify recycle bin state transitions in the UI

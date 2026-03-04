@@ -1,0 +1,63 @@
+services:
+  db-primary:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    container_name: trustdocs-pg-primary
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: trustdocs
+      POSTGRES_USER: trustdocs
+      POSTGRES_PASSWORD: trustdocs_dev
+      POSTGRES_REPLICATION_USER: repl_user
+      POSTGRES_REPLICATION_PASSWORD: repl_password
+    volumes:
+      - pgdata_primary:/var/lib/postgresql/data
+      - ./docker/pg-primary-init.sh:/docker-entrypoint-initdb.d/02-replication.sh
+    command: >
+      postgres
+        -c wal_level=replica
+        -c max_wal_senders=5
+        -c max_replication_slots=5
+        -c hot_standby=on
+        -c shared_buffers=128MB
+        -c work_mem=8MB
+        -c maintenance_work_mem=64MB
+        -c effective_cache_size=256MB
+        -c max_connections=100
+        -c listen_addresses=*
+        -c log_min_messages=warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustdocs -d trustdocs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  db-replica:
+    image: postgres:17-alpine
+    container_name: trustdocs-pg-replica
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_PASSWORD: trustdocs_dev
+      PGUSER: trustdocs
+      PGPASSWORD: trustdocs_dev
+    depends_on:
+      db-primary:
+        condition: service_healthy
+    volumes:
+      - pgdata_replica:/var/lib/postgresql/data
+      - ./docker/pg-replica-entrypoint.sh:/docker-entrypoint-replica.sh
+    entrypoint: ["/bin/sh", "/docker-entrypoint-replica.sh"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustdocs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata_primary:
+  pgdata_replica:

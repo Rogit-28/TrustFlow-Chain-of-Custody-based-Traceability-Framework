@@ -1,0 +1,9 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting cryptography
+  Downloading cryptography-46.0.3-cp311-abi3-win_amd64.whl.metadata (5.7 kB)
+Requirement already satisfied: cffi>=2.0.0 in c:\users\rogit\appdata\roaming\python\python314\site-packages (from cryptography) (2.0.0)
+Requirement already satisfied: pycparser in c:\users\rogit\appdata\roaming\python\python314\site-packages (from cffi>=2.0.0->cryptography) (2.23)
+Downloading cryptography-46.0.3-cp311-abi3-win_amd64.whl (3.5 MB)
+   ---------------------------------------- 3.5/3.5 MB 2.2 MB/s  0:00:01
+Installing collected packages: cryptography
+Successfully installed cryptography-46.0.3

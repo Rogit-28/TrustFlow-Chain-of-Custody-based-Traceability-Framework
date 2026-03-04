@@ -1,0 +1,14 @@
+FROM postgres:17-alpine
+
+ENV POSTGRES_DB=trustdocs \
+    POSTGRES_USER=trustdocs \
+    POSTGRES_PASSWORD=trustdocs_dev \
+    PGDATA=/var/lib/postgresql/data/pgdata
+
+# Performance tuning conf gets loaded by postgres on startup
+RUN mkdir -p /docker-entrypoint-initdb.d
+
+COPY docker/pg-init.sh /docker-entrypoint-initdb.d/01-init.sh
+RUN chmod +x /docker-entrypoint-initdb.d/01-init.sh
+
+EXPOSE 5432
