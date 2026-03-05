@@ -108,7 +108,7 @@ export default function BoardroomDetail() {
     if (!boardroom) return null;
 
     return (
-        <div className="h-full flex flex-col max-w-5xl mx-auto space-y-6 lg:space-y-8">
+        <div className="h-full flex flex-col space-y-6 lg:space-y-8">
             <div className="flex items-center justify-between shrink-0 mb-2">
                 <div className="flex items-center gap-4">
                     <button onClick={() => navigate('/boardroom')} className="p-2 hover:bg-white/5 rounded-full transition-colors">
