@@ -14,6 +14,51 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ── UUID column registry ─────────────────────────────────────────────────────
+# Maps table -> set of column names that are UUID type in PostgreSQL.
+# Used to auto-cast str values to uuid.UUID before sending to asyncpg.
+
+_UUID_COLUMNS: Dict[str, set] = {
+    "users": {"id"},
+    "documents": {"id", "owner_id"},
+    "file_shares": {"id", "document_id", "owner_id", "recipient_id"},
+    "messages": {"id", "document_id", "sender_id", "parent_message_id"},
+    "sessions": {"id", "user_id"},
+    "boardrooms": {"id"},
+    "boardroom_members": {"boardroom_id", "user_id"},
+    "boardroom_proposals": {"id", "boardroom_id", "initiator_id"},
+    "shamir_shares": {"id", "proposal_id", "user_id"},
+}
+
+
+def _cast_uuid(table: str, key: str, value: Any) -> Any:
+    """Cast string values to uuid.UUID if the column is a UUID type."""
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if (
+        isinstance(value, str)
+        and table in _UUID_COLUMNS
+        and key in _UUID_COLUMNS[table]
+    ):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _cast_dict_uuids(table: str, data: dict) -> dict:
+    """Cast all UUID-typed string values in a dict for a given table."""
+    return {k: _cast_uuid(table, k, v) for k, v in data.items()}
+
+
+def _cast_kwargs_uuids(table: str, kwargs: dict) -> dict:
+    """Cast all UUID-typed string values in kwargs for a given table."""
+    return {k: _cast_uuid(table, k, v) for k, v in kwargs.items()}
+
+
 # ── In-memory fallback store ─────────────────────────────────────────────────
 # When PostgreSQL isn't available, we use simple dicts. This allows the app
 # to run in demo mode without any external dependencies.
@@ -24,6 +69,10 @@ _mem: Dict[str, Dict[str, dict]] = {
     "file_shares": {},
     "messages": {},
     "sessions": {},
+    "boardrooms": {},
+    "boardroom_members": {},
+    "boardroom_proposals": {},
+    "shamir_shares": {},
 }
 
 
@@ -165,9 +214,58 @@ async def _create_tables():
     CREATE INDEX IF NOT EXISTS idx_coc_parent_hash ON coc_nodes(parent_hash);
     CREATE INDEX IF NOT EXISTS idx_coc_content_hash ON coc_nodes(content_hash);
     CREATE INDEX IF NOT EXISTS idx_tombstones_expiry ON tombstones(delete_after);
+
+    CREATE TABLE IF NOT EXISTS boardrooms (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        threshold_m INTEGER NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS boardroom_members (
+        boardroom_id UUID REFERENCES boardrooms(id) ON DELETE CASCADE,
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        PRIMARY KEY (boardroom_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS boardroom_proposals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        boardroom_id UUID REFERENCES boardrooms(id) ON DELETE CASCADE,
+        initiator_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        lock_id TEXT,
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS shamir_shares (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        proposal_id UUID REFERENCES boardroom_proposals(id) ON DELETE CASCADE,
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        share_data JSONB NOT NULL,
+        submitted BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (proposal_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_boardroom_members_user ON boardroom_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_boardroom_proposals_boardroom ON boardroom_proposals(boardroom_id);
+    CREATE INDEX IF NOT EXISTS idx_shamir_shares_proposal ON shamir_shares(proposal_id);
     """
     async with _pool.acquire() as conn:
         await conn.execute(sql)
+
+        # ── Migrations for existing databases ────────────────────────────────
+        # Add timelock columns to boardroom_proposals if they don't exist yet.
+        for col, col_type in [("lock_id", "TEXT"), ("expires_at", "TIMESTAMPTZ")]:
+            try:
+                await conn.execute(
+                    f"ALTER TABLE boardroom_proposals ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                )
+            except Exception:
+                pass  # Column already exists or IF NOT EXISTS not supported
+
     logger.info("Database schema created")
 
 
@@ -176,12 +274,20 @@ async def _create_tables():
 
 async def insert(table: str, data: dict) -> dict:
     """Insert a row. Returns the row with generated defaults."""
-    if "id" not in data:
+    if "id" not in data and table not in ("boardroom_members", "coc_recipients"):
         data["id"] = str(uuid.uuid4())
-    if "created_at" not in data:
+    if "created_at" not in data and table not in (
+        "boardroom_members",
+        "coc_recipients",
+    ):
         data["created_at"] = datetime.now(timezone.utc)
 
     if _use_pg and _pool:
+        data = _cast_dict_uuids(table, data)
+        # Serialize any dict/list values to JSON strings for JSONB columns
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                data[k] = json.dumps(v)
         columns = ", ".join(data.keys())
         placeholders = ", ".join(f"${i + 1}" for i in range(len(data)))
         values = list(data.values())
@@ -201,6 +307,7 @@ async def insert(table: str, data: dict) -> dict:
 async def find_one(table: str, **kwargs) -> Optional[dict]:
     """Find one row by column=value filters."""
     if _use_pg and _pool:
+        kwargs = _cast_kwargs_uuids(table, kwargs)
         conditions = " AND ".join(
             f"{k} = ${i + 1}" for i, k in enumerate(kwargs.keys())
         )
@@ -220,15 +327,23 @@ async def find_many(
 ) -> List[dict]:
     """Find multiple rows by column=value filters."""
     if _use_pg and _pool:
+        kwargs = _cast_kwargs_uuids(table, kwargs)
+        if table in ("boardroom_members", "coc_recipients"):
+            order_clause = ""
+        else:
+            order_clause = f" ORDER BY {order_by}"
+
         if kwargs:
             conditions = " AND ".join(
                 f"{k} = ${i + 1}" for i, k in enumerate(kwargs.keys())
             )
-            sql = f"SELECT * FROM {table} WHERE {conditions} ORDER BY {order_by} LIMIT {limit}"
+            sql = (
+                f"SELECT * FROM {table} WHERE {conditions}{order_clause} LIMIT {limit}"
+            )
             async with _pool.acquire() as conn:
                 rows = await conn.fetch(sql, *kwargs.values())
         else:
-            sql = f"SELECT * FROM {table} ORDER BY {order_by} LIMIT {limit}"
+            sql = f"SELECT * FROM {table}{order_clause} LIMIT {limit}"
             async with _pool.acquire() as conn:
                 rows = await conn.fetch(sql)
         return [dict(r) for r in rows]
@@ -244,6 +359,8 @@ async def find_many(
 async def update_one(table: str, row_id: str, **updates) -> Optional[dict]:
     """Update a row by ID."""
     if _use_pg and _pool:
+        row_id = _cast_uuid(table, "id", row_id)
+        updates = _cast_kwargs_uuids(table, updates)
         sets = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(updates.keys()))
         sql = f"UPDATE {table} SET {sets} WHERE id = $1 RETURNING *"
         async with _pool.acquire() as conn:
@@ -259,6 +376,7 @@ async def update_one(table: str, row_id: str, **updates) -> Optional[dict]:
 async def delete_one(table: str, row_id: str) -> bool:
     """Delete a row by ID."""
     if _use_pg and _pool:
+        row_id = _cast_uuid(table, "id", row_id)
         sql = f"DELETE FROM {table} WHERE id = $1"
         async with _pool.acquire() as conn:
             result = await conn.execute(sql, row_id)
@@ -270,6 +388,7 @@ async def delete_one(table: str, row_id: str) -> bool:
 async def delete_where(table: str, **kwargs) -> int:
     """Delete rows matching conditions. Returns count."""
     if _use_pg and _pool:
+        kwargs = _cast_kwargs_uuids(table, kwargs)
         conditions = " AND ".join(
             f"{k} = ${i + 1}" for i, k in enumerate(kwargs.keys())
         )

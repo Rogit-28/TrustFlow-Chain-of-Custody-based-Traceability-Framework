@@ -1,4 +1,14 @@
-"""TrustFlow Network Peer - standalone process with ZeroMQ communication."""
+"""
+TrustFlow Network Peer Process
+
+Standalone peer implementation that runs as a separate process.
+Uses ZeroMQ for inter-peer communication:
+- PUB socket: Broadcasts (deletion tokens, status updates)
+- REP socket: Direct request/response (shares, CoC nodes)
+- SUB socket: Subscribes to broadcasts from other peers
+
+Each peer maintains its own storage, crypto keys, and audit log.
+"""
 
 from __future__ import annotations
 
@@ -19,11 +29,7 @@ try:
     ZMQ_AVAILABLE = True
 except ImportError:
     ZMQ_AVAILABLE = False
-
-import logging
-_zmq_logger = logging.getLogger("trustflow.network.peer_process")
-if not ZMQ_AVAILABLE:
-    _zmq_logger.warning("pyzmq not installed. Network functionality disabled.")
+    print("[WARNING] pyzmq not installed. Network functionality disabled.")
 
 from nacl.signing import SigningKey, VerifyKey
 
@@ -38,15 +44,9 @@ from .protocol import (
     RequestMessage,
     ResponseMessage,
     HeartbeatMessage,
-    KeyExchangeMessage,
-    KeyExchangeAckMessage,
     PeerStatus,
     SocketConfig,
-    SignedEnvelope,
-    SignatureVerificationError,
-    MessageTimestampError,
     deserialize_message,
-    unwrap_and_verify,
 )
 
 # Import core components
@@ -56,13 +56,13 @@ if TYPE_CHECKING:
 
 from ..core.crypto_core import CryptoCore
 from ..interfaces.storage_backend import InMemoryStorage
-from ..core.logging import peer_logger
 
 
 @dataclass
 class PeerConfig:
+    """Configuration for a network peer."""
     peer_id: str
-    peer_index: int
+    peer_index: int                     # Index for port assignment
     host: str = "127.0.0.1"
     signing_key: Optional[SigningKey] = None
     enable_secret_sharing: bool = True
@@ -72,6 +72,7 @@ class PeerConfig:
 
 @dataclass
 class PeerState:
+    """Runtime state for a network peer."""
     is_online: bool = True
     connected_peers: Set[str] = field(default_factory=set)
     pending_messages: List[NetworkMessage] = field(default_factory=list)
@@ -79,7 +80,20 @@ class PeerState:
 
 
 class NetworkPeer:
-    """Standalone TrustFlow peer with ZeroMQ networking and cryptographic identity."""
+    """
+    A peer in the TrustFlow network running as a standalone process.
+    
+    Communication:
+    - PUB socket on port 5550+index: Broadcasts to all subscribers
+    - REP socket on port 5600+index: Handles direct requests
+    - SUB sockets: Subscribes to other peers' PUB sockets
+    
+    Features:
+    - Cryptographic identity (Ed25519)
+    - Local storage for CoC nodes, shares, and content
+    - Offline message queuing
+    - Automatic reconnection
+    """
     
     def __init__(self, config: PeerConfig):
         if not ZMQ_AVAILABLE:
@@ -96,24 +110,31 @@ class NetworkPeer:
             self.signing_key = SigningKey.generate()
         self.verify_key = self.signing_key.verify_key
         
+        # Storage
         self.storage = InMemoryStorage()
-        self._shares: Dict[str, Any] = {}
-        self._content: Dict[str, bytes] = {}
-        self._peer_keys: Dict[str, VerifyKey] = {}
+        self._shares: Dict[str, Any] = {}           # content_hash -> Share
+        self._content: Dict[str, bytes] = {}        # content_hash -> encrypted content
+        self._peer_keys: Dict[str, VerifyKey] = {}  # peer_id -> verify_key
         
+        # Message handlers
         self._message_handlers: Dict[MessageType, Callable] = {}
         self._register_default_handlers()
         
+        # ZeroMQ context and sockets
         self._context: Optional[zmq.asyncio.Context] = None
         self._pub_socket: Optional[zmq.asyncio.Socket] = None
         self._rep_socket: Optional[zmq.asyncio.Socket] = None
         self._sub_sockets: Dict[str, zmq.asyncio.Socket] = {}
+        
+        # Offline queue
         self._offline_queue: Queue = Queue()
+        
+        # Control
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._log = peer_logger(self.peer_id)
     
     def _register_default_handlers(self):
+        """Register default message handlers."""
         self._message_handlers[MessageType.SHARE] = self._handle_share
         self._message_handlers[MessageType.DELETION_TOKEN] = self._handle_deletion
         self._message_handlers[MessageType.COC_NODE] = self._handle_coc_node
@@ -122,36 +143,47 @@ class NetworkPeer:
         self._message_handlers[MessageType.REQUEST_SHARE] = self._handle_request_share
         self._message_handlers[MessageType.REQUEST_CONTENT] = self._handle_request_content
         self._message_handlers[MessageType.HEARTBEAT] = self._handle_heartbeat
-        self._message_handlers[MessageType.KEY_EXCHANGE] = self._handle_key_exchange
-        self._message_handlers[MessageType.KEY_EXCHANGE_ACK] = self._handle_key_exchange_ack
     
     def register_handler(self, msg_type: MessageType, handler: Callable):
+        """Register a custom message handler."""
         self._message_handlers[msg_type] = handler
     
+    # ==================== Socket Management ====================
+    
     async def start(self):
+        """Start the peer and begin listening for messages."""
         self._running = True
         self._context = zmq.asyncio.Context()
         
+        # Create PUB socket for broadcasts
         self._pub_socket = self._context.socket(zmq.PUB)
         pub_addr = SocketConfig.get_pub_address(self.config.peer_index, self.config.host)
         self._pub_socket.bind(pub_addr)
         
+        # Create REP socket for direct requests
         self._rep_socket = self._context.socket(zmq.REP)
         rep_addr = SocketConfig.get_rep_address(self.config.peer_index, self.config.host)
         self._rep_socket.bind(rep_addr)
         
-        self._log.info("Started", pub_addr=pub_addr, rep_addr=rep_addr)
+        print(f"[PEER {self.peer_id[:8]}] Started - PUB: {pub_addr}, REP: {rep_addr}")
+        
+        # Broadcast online status
         await self._broadcast_status(PeerStatus.ONLINE)
         
+        # Start message processing loops
         self._loop = asyncio.get_event_loop()
         asyncio.create_task(self._rep_loop())
         asyncio.create_task(self._sub_loop())
         asyncio.create_task(self._heartbeat_loop())
     
     async def stop(self):
+        """Stop the peer gracefully."""
         self._running = False
+        
+        # Broadcast offline status
         await self._broadcast_status(PeerStatus.OFFLINE)
         
+        # Close sockets
         if self._pub_socket:
             self._pub_socket.close()
         if self._rep_socket:
@@ -162,191 +194,97 @@ class NetworkPeer:
         if self._context:
             self._context.term()
         
-        self._log.info("Stopped")
+        print(f"[PEER {self.peer_id[:8]}] Stopped")
     
     async def connect_to_peer(self, peer_id: str, peer_index: int, host: str = "127.0.0.1"):
-        """Subscribe to peer's broadcasts and perform key exchange."""
+        """Subscribe to another peer's broadcasts."""
         if peer_id in self._sub_sockets:
             return  # Already connected
         
         sub_socket = self._context.socket(zmq.SUB)
         pub_addr = SocketConfig.get_pub_address(peer_index, host)
         sub_socket.connect(pub_addr)
-        sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")  # Subscribe to all messages
+        
         self._sub_sockets[peer_id] = sub_socket
         self.state.connected_peers.add(peer_id)
         
-        self._log.info("Connected to peer", target_peer=peer_id[:8], address=pub_addr)
-        await self._perform_key_exchange(peer_id, peer_index, host)
-    
-    async def _perform_key_exchange(self, peer_id: str, peer_index: int, host: str = "127.0.0.1"):
-        """Send our public key and receive theirs for authenticated communication."""
-        key_exchange_msg = KeyExchangeMessage(
-            sender_id=self.peer_id,
-            public_key=self.verify_key.encode().hex(),
-            peer_address=SocketConfig.get_rep_address(self.config.peer_index, self.config.host),
-        )
-        
-        req_socket = self._context.socket(zmq.REQ)
-        req_socket.setsockopt(zmq.RCVTIMEO, 5000)
-        req_socket.setsockopt(zmq.SNDTIMEO, 5000)
-        req_socket.setsockopt(zmq.LINGER, 0)
-        
-        try:
-            rep_addr = SocketConfig.get_rep_address(peer_index, host)
-            req_socket.connect(rep_addr)
-            
-            await req_socket.send(key_exchange_msg.to_bytes())
-            resp_bytes = await req_socket.recv()
-            response = ResponseMessage.from_dict(json.loads(resp_bytes.decode("utf-8")))
-            
-            if response.success and response.data.get("public_key"):
-                peer_key_bytes = bytes.fromhex(response.data["public_key"])
-                peer_verify_key = VerifyKey(peer_key_bytes)
-                self._peer_keys[peer_id] = peer_verify_key
-                
-                self._log.info("Key exchange complete", target_peer=peer_id[:8])
-            else:
-                self._log.warning("Key exchange failed", target_peer=peer_id[:8], 
-                                error=response.error_message or "Unknown error")
-        except zmq.Again:
-            self._log.warning("Key exchange timeout", target_peer=peer_id[:8])
-        except Exception as e:
-            self._log.error("Key exchange error", target_peer=peer_id[:8], error=str(e))
-        finally:
-            req_socket.close()
+        print(f"[PEER {self.peer_id[:8]}] Connected to peer {peer_id[:8]} at {pub_addr}")
     
     async def disconnect_from_peer(self, peer_id: str):
+        """Unsubscribe from a peer's broadcasts."""
         if peer_id in self._sub_sockets:
             self._sub_sockets[peer_id].close()
             del self._sub_sockets[peer_id]
             self.state.connected_peers.discard(peer_id)
-            self._log.info("Disconnected from peer", target_peer=peer_id[:8])
+            print(f"[PEER {self.peer_id[:8]}] Disconnected from peer {peer_id[:8]}")
+    
+    # ==================== Message Loops ====================
     
     async def _rep_loop(self):
+        """Handle direct request/response messages."""
         while self._running:
             try:
+                # Non-blocking receive with timeout
                 if await self._rep_socket.poll(timeout=100):
                     msg_bytes = await self._rep_socket.recv()
+                    message = deserialize_message(msg_bytes)
                     
-                    try:
-                        message, sender_id = unwrap_and_verify(
-                            msg_bytes,
-                            lambda pid: self._peer_keys.get(pid),
-                            validate_time=True
-                        )
-                    except SignatureVerificationError as e:
-                        self._log.warning("Request rejected - signature verification failed", error=str(e))
-                        error_resp = ResponseMessage(
-                            sender_id=self.peer_id,
-                            success=False,
-                            error_message=f"Signature verification failed: {e}"
-                        )
-                        envelope = SignedEnvelope.wrap(error_resp, self.peer_id, self.signing_key)
-                        await self._rep_socket.send(envelope.to_bytes())
-                        continue
-                    except MessageTimestampError as e:
-                        self._log.warning("Request rejected - timestamp invalid", error=str(e))
-                        error_resp = ResponseMessage(
-                            sender_id=self.peer_id,
-                            success=False,
-                            error_message=f"Timestamp validation failed: {e}"
-                        )
-                        envelope = SignedEnvelope.wrap(error_resp, self.peer_id, self.signing_key)
-                        await self._rep_socket.send(envelope.to_bytes())
-                        continue
-                    except Exception:
-                        # Fallback: try plain message for key exchange
-                        try:
-                            message = deserialize_message(msg_bytes)
-                            sender_id = message.sender_id
-                            if message.msg_type not in (MessageType.KEY_EXCHANGE, MessageType.KEY_EXCHANGE_ACK):
-                                self._log.warning("Unsigned non-key-exchange message rejected", sender=sender_id[:8])
-                                error_resp = ResponseMessage(
-                                    sender_id=self.peer_id,
-                                    success=False,
-                                    error_message="Unsigned messages not accepted"
-                                )
-                                await self._rep_socket.send(error_resp.to_bytes())
-                                continue
-                        except Exception as parse_err:
-                            self._log.error("Failed to parse message", error=str(parse_err))
-                            error_resp = ResponseMessage(
-                                sender_id=self.peer_id,
-                                success=False,
-                                error_message="Invalid message format"
-                            )
-                            await self._rep_socket.send(error_resp.to_bytes())
-                            continue
-                    
+                    # Process and send response
                     response = await self._handle_request(message)
-                    envelope = SignedEnvelope.wrap(response, self.peer_id, self.signing_key)
-                    await self._rep_socket.send(envelope.to_bytes())
+                    await self._rep_socket.send(response.to_bytes())
             except zmq.ZMQError as e:
                 if self._running:
-                    self._log.error("REP error", error=str(e))
+                    print(f"[PEER {self.peer_id[:8]}] REP error: {e}")
             except Exception as e:
                 if self._running:
-                    self._log.error("REP handler error", error=str(e))
+                    print(f"[PEER {self.peer_id[:8]}] REP handler error: {e}")
+                    # Send error response
                     error_resp = ResponseMessage(
                         sender_id=self.peer_id,
                         success=False,
                         error_message=str(e)
                     )
                     try:
-                        envelope = SignedEnvelope.wrap(error_resp, self.peer_id, self.signing_key)
-                        await self._rep_socket.send(envelope.to_bytes())
+                        await self._rep_socket.send(error_resp.to_bytes())
                     except zmq.ZMQError:
-                        pass
+                        pass  # Socket may already be closed
     
     async def _sub_loop(self):
+        """Handle broadcast messages from subscribed peers."""
         while self._running:
             for peer_id, sub_socket in list(self._sub_sockets.items()):
                 try:
                     if await sub_socket.poll(timeout=10):
                         msg_bytes = await sub_socket.recv()
-                        
-                        try:
-                            message, sender_id = unwrap_and_verify(
-                                msg_bytes,
-                                lambda pid: self._peer_keys.get(pid),
-                                validate_time=True
-                            )
-                            await self._handle_broadcast(message)
-                        except SignatureVerificationError as e:
-                            self._log.warning(
-                                "Broadcast dropped - signature verification failed",
-                                source_peer=peer_id[:8],
-                                error=str(e)
-                            )
-                        except MessageTimestampError as e:
-                            self._log.warning(
-                                "Broadcast dropped - timestamp invalid",
-                                source_peer=peer_id[:8],
-                                error=str(e)
-                            )
+                        message = deserialize_message(msg_bytes)
+                        await self._handle_broadcast(message)
                 except zmq.ZMQError as e:
                     if self._running:
-                        self._log.error("SUB error", source_peer=peer_id[:8], error=str(e))
+                        print(f"[PEER {self.peer_id[:8]}] SUB error from {peer_id[:8]}: {e}")
                 except Exception as e:
                     if self._running:
-                        self._log.error("SUB handler error", error=str(e))
+                        print(f"[PEER {self.peer_id[:8]}] SUB handler error: {e}")
             
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.01)  # Small delay to prevent busy loop
     
     async def _heartbeat_loop(self):
+        """Send periodic heartbeats."""
         sequence = 0
         while self._running:
             heartbeat = HeartbeatMessage(
                 sender_id=self.peer_id,
                 sequence=sequence,
-                load=0
+                load=0  # TODO: Implement actual load calculation
             )
             await self._broadcast(heartbeat)
             sequence += 1
             await asyncio.sleep(SocketConfig.HEARTBEAT_INTERVAL)
     
+    # ==================== Message Handling ====================
+    
     async def _handle_request(self, message: NetworkMessage) -> ResponseMessage:
+        """Handle a direct request and return response."""
         handler = self._message_handlers.get(message.msg_type)
         
         if handler:
@@ -374,15 +312,21 @@ class NetworkPeer:
             )
     
     async def _handle_broadcast(self, message: NetworkMessage):
+        """Handle a broadcast message."""
         handler = self._message_handlers.get(message.msg_type)
         if handler:
             try:
                 await handler(message)
             except Exception as e:
-                self._log.error("Broadcast handler error", error=str(e))
+                print(f"[PEER {self.peer_id[:8]}] Broadcast handler error: {e}")
+    
+    # ==================== Default Handlers ====================
     
     async def _handle_share(self, message: ShareMessage) -> Dict:
-        self._log.info("Received share", share_index=message.share_index, content_hash=message.content_hash[:8])
+        """Handle incoming secret share."""
+        print(f"[PEER {self.peer_id[:8]}] Received share {message.share_index} for content {message.content_hash[:8]}")
+        
+        # Store the share
         self._shares[message.content_hash] = {
             "index": message.share_index,
             "data": message.share_data,
@@ -394,51 +338,72 @@ class NetworkPeer:
         return {"stored": True, "content_hash": message.content_hash}
     
     async def _handle_deletion(self, message: DeletionTokenMessage) -> Dict:
-        self._log.info("Received deletion token", node_hash=message.node_hash[:8])
+        """Handle deletion token."""
+        print(f"[PEER {self.peer_id[:8]}] Received deletion token for node {message.node_hash[:8]}")
+        
+        # Verify signature if we have originator's key
         originator_key = self._peer_keys.get(message.originator_id)
         if originator_key:
             token_data = f"{message.node_hash}{message.originator_id}{message.timestamp}"
             if not CryptoCore.verify_signature(originator_key, token_data, bytes.fromhex(message.token_signature)):
-                self._log.warning("Invalid deletion token signature")
+                print(f"[PEER {self.peer_id[:8]}] Invalid deletion token signature")
                 return {"deleted": False, "reason": "invalid_signature"}
         
+        # Delete the node from storage
         node = self.storage.get_node(message.node_hash)
         if node:
             self.storage.remove_node(message.node_hash)
+            
+            # Also delete associated share if exists
             if node.content_hash in self._shares:
                 del self._shares[node.content_hash]
+            
+            # Also delete content if no other references
             if node.content_hash in self._content:
                 del self._content[node.content_hash]
             
-            self._log.info("Deleted node", node_hash=message.node_hash[:8])
+            print(f"[PEER {self.peer_id[:8]}] Deleted node {message.node_hash[:8]}")
             return {"deleted": True, "node_hash": message.node_hash}
         
         return {"deleted": False, "reason": "not_found"}
     
     async def _handle_coc_node(self, message: CoCNodeMessage) -> Dict:
-        self._log.info("Received CoC node", content_hash=message.content_hash[:8])
+        """Handle incoming CoC node."""
+        print(f"[PEER {self.peer_id[:8]}] Received CoC node {message.content_hash[:8]}")
+        
+        # Import here to avoid circular imports
         from ..core.coc_node import CoCNode
+        
+        # Reconstruct the node
         node = CoCNode.from_dict(message.node_data)
+        
+        # Store the node
         self.storage.store_node(node)
         
         return {"stored": True, "node_hash": node.node_hash}
     
     async def _handle_peer_status(self, message: PeerStatusMessage) -> Dict:
+        """Handle peer status update."""
         if message.status == PeerStatus.ONLINE:
             self.state.connected_peers.add(message.peer_id)
-            self._log.info("Peer online", target_peer=message.peer_id[:8])
+            print(f"[PEER {self.peer_id[:8]}] Peer {message.peer_id[:8]} is now ONLINE")
         elif message.status == PeerStatus.OFFLINE:
             self.state.connected_peers.discard(message.peer_id)
-            self._log.info("Peer offline", target_peer=message.peer_id[:8])
+            print(f"[PEER {self.peer_id[:8]}] Peer {message.peer_id[:8]} is now OFFLINE")
         
         return {"acknowledged": True}
     
     async def _handle_content(self, message: ContentMessage) -> Dict:
-        self._log.info("Received content", content_hash=message.content_hash[:8])
+        """Handle incoming encrypted content."""
+        print(f"[PEER {self.peer_id[:8]}] Received content {message.content_hash[:8]}")
+        
+        # Store encrypted content
         self._content[message.content_hash] = bytes.fromhex(message.encrypted_content)
+        
         return {"stored": True, "content_hash": message.content_hash}
     
     async def _handle_request_share(self, message: RequestMessage) -> Dict:
+        """Handle request for a share."""
         content_hash = message.content_hash
         
         if content_hash in self._shares:
@@ -451,6 +416,7 @@ class NetworkPeer:
         return {"found": False}
     
     async def _handle_request_content(self, message: RequestMessage) -> Dict:
+        """Handle request for content."""
         content_hash = message.content_hash
         
         if content_hash in self._content:
@@ -462,49 +428,19 @@ class NetworkPeer:
         return {"found": False}
     
     async def _handle_heartbeat(self, message: HeartbeatMessage) -> Dict:
+        """Handle heartbeat from peer."""
         self.state.last_heartbeat[message.sender_id] = time.time()
         return {"acknowledged": True}
     
-    async def _handle_key_exchange(self, message: KeyExchangeMessage) -> Dict:
-        """Store sender's public key and return ours."""
-        self._log.info("Key exchange request", from_peer=message.sender_id[:8])
-        
-        try:
-            sender_key_bytes = bytes.fromhex(message.public_key)
-            sender_verify_key = VerifyKey(sender_key_bytes)
-            self._peer_keys[message.sender_id] = sender_verify_key
-            self._log.info("Stored peer key", peer=message.sender_id[:8])
-        except Exception as e:
-            self._log.error("Failed to store peer key", peer=message.sender_id[:8], error=str(e))
-            return {"success": False, "error": str(e)}
-        
-        return {
-            "success": True,
-            "public_key": self.verify_key.encode().hex(),
-            "peer_id": self.peer_id,
-            "original_nonce": message.nonce,
-        }
-    
-    async def _handle_key_exchange_ack(self, message: KeyExchangeAckMessage) -> Dict:
-        self._log.info("Key exchange ack", from_peer=message.sender_id[:8])
-        
-        try:
-            sender_key_bytes = bytes.fromhex(message.public_key)
-            sender_verify_key = VerifyKey(sender_key_bytes)
-            self._peer_keys[message.sender_id] = sender_verify_key
-            self._log.info("Stored peer key from ack", peer=message.sender_id[:8])
-        except Exception as e:
-            self._log.error("Failed to store peer key from ack", error=str(e))
-            return {"success": False, "error": str(e)}
-        
-        return {"success": True}
+    # ==================== Sending Messages ====================
     
     async def _broadcast(self, message: NetworkMessage):
+        """Broadcast a message to all subscribers."""
         if self._pub_socket:
-            envelope = SignedEnvelope.wrap(message, self.peer_id, self.signing_key)
-            await self._pub_socket.send(envelope.to_bytes())
+            await self._pub_socket.send(message.to_bytes())
     
     async def _broadcast_status(self, status: PeerStatus):
+        """Broadcast peer status update."""
         msg = PeerStatusMessage(
             sender_id=self.peer_id,
             peer_id=self.peer_id,
@@ -515,6 +451,7 @@ class NetworkPeer:
         await self._broadcast(msg)
     
     def _get_capabilities(self) -> List[str]:
+        """Get list of supported capabilities."""
         caps = ["coc", "deletion"]
         if self.config.enable_secret_sharing:
             caps.append("secret_sharing")
@@ -526,6 +463,7 @@ class NetworkPeer:
     
     async def send_direct(self, peer_id: str, peer_index: int, message: NetworkMessage, 
                           host: str = "127.0.0.1", timeout: int = 5000) -> Optional[ResponseMessage]:
+        """Send a direct request to a peer and wait for response."""
         req_socket = self._context.socket(zmq.REQ)
         req_socket.setsockopt(zmq.RCVTIMEO, timeout)
         req_socket.setsockopt(zmq.SNDTIMEO, timeout)
@@ -535,35 +473,21 @@ class NetworkPeer:
             rep_addr = SocketConfig.get_rep_address(peer_index, host)
             req_socket.connect(rep_addr)
             
-            envelope = SignedEnvelope.wrap(message, self.peer_id, self.signing_key)
-            await req_socket.send(envelope.to_bytes())
+            await req_socket.send(message.to_bytes())
             resp_bytes = await req_socket.recv()
             
-            verify_key = self._peer_keys.get(peer_id)
-            if verify_key:
-                try:
-                    response_msg, _ = unwrap_and_verify(
-                        resp_bytes,
-                        lambda pid: self._peer_keys.get(pid)
-                    )
-                    if isinstance(response_msg, ResponseMessage):
-                        return response_msg
-                    return ResponseMessage.from_dict(response_msg.to_dict())
-                except (SignatureVerificationError, MessageTimestampError) as e:
-                    self._log.warning("Response verification failed", target_peer=peer_id[:8], error=str(e))
-                    return None
-            else:
-                return ResponseMessage.from_dict(json.loads(resp_bytes.decode("utf-8")))
+            return ResponseMessage.from_dict(json.loads(resp_bytes.decode("utf-8")))
         except zmq.Again:
-            self._log.warning("Timeout sending", target_peer=peer_id[:8])
+            print(f"[PEER {self.peer_id[:8]}] Timeout sending to {peer_id[:8]}")
             return None
         except Exception as e:
-            self._log.error("Error sending", target_peer=peer_id[:8], error=str(e))
+            print(f"[PEER {self.peer_id[:8]}] Error sending to {peer_id[:8]}: {e}")
             return None
         finally:
             req_socket.close()
     
     async def broadcast_deletion(self, node_hash: str, originator_id: str, signature: str):
+        """Broadcast a deletion token to all peers."""
         msg = DeletionTokenMessage(
             sender_id=self.peer_id,
             node_hash=node_hash,
@@ -572,10 +496,11 @@ class NetworkPeer:
             cascade=True
         )
         await self._broadcast(msg)
-        self._log.info("Broadcast deletion", node_hash=node_hash[:8])
+        print(f"[PEER {self.peer_id[:8]}] Broadcast deletion for node {node_hash[:8]}")
     
     async def send_share(self, peer_id: str, peer_index: int, share_data: Dict, 
                          content_hash: str, threshold: int, total_shares: int) -> bool:
+        """Send a secret share to a specific peer."""
         msg = ShareMessage(
             sender_id=self.peer_id,
             share_index=share_data["index"],
@@ -589,6 +514,7 @@ class NetworkPeer:
         return response is not None and response.success
     
     async def send_coc_node(self, peer_id: str, peer_index: int, node: CoCNode) -> bool:
+        """Send a CoC node to a specific peer."""
         msg = CoCNodeMessage(
             sender_id=self.peer_id,
             node_data=node.to_dict(),
@@ -599,13 +525,19 @@ class NetworkPeer:
         response = await self.send_direct(peer_id, peer_index, msg)
         return response is not None and response.success
     
+    # ==================== Offline Handling ====================
+    
     def go_offline(self):
+        """Simulate going offline."""
         self.state.is_online = False
-        self._log.info("Now OFFLINE - messages will be queued")
+        print(f"[PEER {self.peer_id[:8]}] Now OFFLINE - messages will be queued")
     
     def go_online(self):
+        """Simulate coming online and process queued messages."""
         self.state.is_online = True
-        self._log.info("Now ONLINE - processing queued messages")
+        print(f"[PEER {self.peer_id[:8]}] Now ONLINE - processing queued messages")
+        
+        # Process queued messages
         while not self._offline_queue.empty():
             try:
                 message = self._offline_queue.get_nowait()
@@ -614,22 +546,33 @@ class NetworkPeer:
                 break
     
     async def process_pending_messages(self):
+        """Process all pending messages after coming online."""
         while self.state.pending_messages:
             message = self.state.pending_messages.pop(0)
             await self._handle_broadcast(message)
     
+    # ==================== Utility ====================
+    
     def register_peer_key(self, peer_id: str, verify_key: VerifyKey):
+        """Register a peer's verification key for signature verification."""
         self._peer_keys[peer_id] = verify_key
     
     def get_share(self, content_hash: str) -> Optional[Dict]:
+        """Get stored share for content."""
         return self._shares.get(content_hash)
     
     def get_content(self, content_hash: str) -> Optional[bytes]:
+        """Get stored encrypted content."""
         return self._content.get(content_hash)
 
 
 def run_peer_process(config_dict: Dict):
-    """Entry point for running a peer as a standalone process."""
+    """
+    Entry point for running a peer as a standalone process.
+    
+    Args:
+        config_dict: Dictionary with peer configuration
+    """
     config = PeerConfig(
         peer_id=config_dict["peer_id"],
         peer_index=config_dict["peer_index"],
@@ -640,6 +583,8 @@ def run_peer_process(config_dict: Dict):
     
     async def main():
         await peer.start()
+        
+        # Keep running until interrupted
         try:
             while True:
                 await asyncio.sleep(1)
@@ -648,8 +593,9 @@ def run_peer_process(config_dict: Dict):
         finally:
             await peer.stop()
     
+    # Handle signals
     def signal_handler(sig, frame):
-        _zmq_logger.info(f"Peer {config.peer_id[:8]} shutting down...")
+        print(f"\n[PEER {config.peer_id[:8]}] Shutting down...")
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -659,8 +605,9 @@ def run_peer_process(config_dict: Dict):
 
 
 if __name__ == "__main__":
+    # Run as standalone process with arguments
     if len(sys.argv) < 3:
-        _zmq_logger.error("Usage: python -m coc_framework.network.peer_process <peer_id> <peer_index>")
+        print("Usage: python -m coc_framework.network.peer_process <peer_id> <peer_index>")
         sys.exit(1)
     
     config = {

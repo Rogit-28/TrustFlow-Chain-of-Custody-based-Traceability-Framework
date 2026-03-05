@@ -13,6 +13,7 @@ from coc_framework.core.coc_node import CoCNode
 from coc_framework.core.crypto_core import CryptoCore
 from coc_framework.core.audit_log import AuditLog
 from coc_framework.core.steganography import SteganoEngine
+from coc_framework.core.timelock import TimeLockEngine
 from coc_framework.interfaces.postgres_backend import PostgresStorageBackend
 from trustdocs import database as db
 
@@ -31,8 +32,9 @@ class TrustFlowService:
     def __init__(self):
         self.audit_log = AuditLog()
         self.stegano_engine = SteganoEngine()
+        self.timelock_engine = TimeLockEngine(cleanup_interval=5.0)
         self.storage = PostgresStorageBackend()
-        
+
         # System key used to sign CoC nodes since user keys are password-encrypted
         self.system_signing_key, self.system_verify_key = CryptoCore.generate_keypair()
 
@@ -51,18 +53,21 @@ class TrustFlowService:
     # ── Chain of Custody ─────────────────────────────────────────────────
 
     async def create_document_node(
-        self, owner_peer_id: str, content: str, recipient_ids: Optional[List[str]] = None
+        self,
+        owner_peer_id: str,
+        content: str,
+        recipient_ids: Optional[List[str]] = None,
     ) -> CoCNode:
         """Create a root CoC node for a new document upload."""
         content_hash = CryptoCore.hash_content(content)
-        
+
         node = CoCNode(
             content_hash=content_hash,
             owner_id=owner_peer_id,
             signing_key=self.system_signing_key,
-            recipient_ids=recipient_ids or []
+            recipient_ids=recipient_ids or [],
         )
-        
+
         await self.storage.add_node(node)
         self.audit_log.log_event("UPLOAD", owner_peer_id, node.node_hash)
         return node
@@ -98,7 +103,10 @@ class TrustFlowService:
         # Update parent recipients in DB if necessary
         for pid in recipient_peer_ids:
             try:
-                await db.insert("coc_recipients", {"node_hash": parent_node.node_hash, "recipient_peer_id": pid})
+                await db.insert(
+                    "coc_recipients",
+                    {"node_hash": parent_node.node_hash, "recipient_peer_id": pid},
+                )
             except Exception:
                 pass
 
@@ -125,11 +133,11 @@ class TrustFlowService:
         """Augment nodes with user presence and username for UI rendering."""
         if not nodes:
             return []
-            
+
         users = await db.find_many("users")
         user_map = {}
         now = datetime.now(timezone.utc)
-        
+
         for u in users:
             is_online = False
             last_seen = u.get("last_seen_at")
@@ -140,24 +148,23 @@ class TrustFlowService:
                     last_seen = last_seen.replace(tzinfo=timezone.utc)
                 if now - last_seen < timedelta(minutes=2):
                     is_online = True
-            
-            user_map[u["peer_id"]] = {
-                "username": u["username"],
-                "is_online": is_online
-            }
-            
+
+            user_map[u["peer_id"]] = {"username": u["username"], "is_online": is_online}
+
         docs = await db.find_many("documents")
         doc_map = {d["coc_node_hash"]: d["filename"] for d in docs}
-            
+
         augmented_nodes = []
         for n in nodes:
             n_dict = n.to_dict()
-            owner_info = user_map.get(n.owner_id, {"username": "Unknown", "is_online": False})
+            owner_info = user_map.get(
+                n.owner_id, {"username": "Unknown", "is_online": False}
+            )
             n_dict["owner_username"] = owner_info["username"]
             n_dict["is_online"] = owner_info["is_online"]
             n_dict["filename"] = doc_map.get(n.node_hash, "")
             augmented_nodes.append(n_dict)
-            
+
         return augmented_nodes
 
     async def get_all_nodes(self) -> tuple:
@@ -165,42 +172,44 @@ class TrustFlowService:
         nodes = await self.storage.get_all_nodes()
         augmented = await self._augment_nodes(nodes)
         nodes_map = {n["node_hash"]: n for n in augmented}
-        edges = [{"from": n.parent_hash, "to": n.node_hash} for n in nodes if n.parent_hash]
+        edges = [
+            {"from": n.parent_hash, "to": n.node_hash} for n in nodes if n.parent_hash
+        ]
         return list(nodes_map.values()), edges
 
     async def get_graph_for_peer(self, peer_id: str) -> tuple:
         """Return nodes/edges visible to a specific peer."""
         nodes = await self.storage.get_all_nodes()
-        
+
         # 1. Identify all nodes the user directly interacts with
         visible_raw_nodes = []
         for n in nodes:
             if n.owner_id == peer_id or peer_id in n.recipient_ids:
                 visible_raw_nodes.append(n)
-                
+
         # 2. For each visible node, crawl UP to find its ultimate Root hash
         root_hashes = set()
         nodes_by_hash = {n.node_hash: n for n in nodes}
-        
+
         for n in visible_raw_nodes:
             current = n
             while current.parent_hash and current.parent_hash in nodes_by_hash:
                 current = nodes_by_hash[current.parent_hash]
             root_hashes.add(current.node_hash)
-            
+
         # 3. For every Root hash identified, capture its entire lineage
         provenance_nodes_map = {}
         edges = []
-        
+
         for root_hash in root_hashes:
             root_node = nodes_by_hash[root_hash]
             stack = [root_node]
-            
+
             while stack:
                 current = stack.pop()
                 if current.node_hash not in provenance_nodes_map:
                     provenance_nodes_map[current.node_hash] = current
-                    
+
                     # Add child links to edges and stack
                     for child_hash in current.children_hashes:
                         edges.append({"from": current.node_hash, "to": child_hash})
@@ -210,10 +219,10 @@ class TrustFlowService:
         # 4. Augment and return the full provenance subgraph
         augmented = await self._augment_nodes(list(provenance_nodes_map.values()))
         final_nodes_map = {n["node_hash"]: n for n in augmented}
-        
+
         # Filter duplicates in edges just in case multiple lineages overlapped
         unique_edges = [dict(t) for t in {tuple(d.items()) for d in edges}]
-        
+
         return list(final_nodes_map.values()), unique_edges
 
     async def get_node(self, node_hash: str) -> Optional[CoCNode]:
@@ -224,11 +233,11 @@ class TrustFlowService:
         nodes = []
         edges = []
         nodes_seen = set()
-        
+
         root = await self.storage.get_node(root_hash)
         if not root:
             return [], []
-            
+
         stack = [root]
         while stack:
             node = stack.pop()
@@ -241,13 +250,14 @@ class TrustFlowService:
                 child = await self.storage.get_node(child_hash)
                 if child:
                     stack.append(child)
-                    
+
         augmented = await self._augment_nodes(nodes)
         return augmented, edges
 
     async def delete_document(self, owner_peer_id: str, node_hash: str):
         """Log the deletion event. Network propagation is handled natively by DB views."""
         self.audit_log.log_event("DELETE", owner_peer_id, node_hash)
+
 
 # Singleton instance — shared across the app.
 trustflow = TrustFlowService()

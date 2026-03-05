@@ -15,6 +15,7 @@ export default defineConfig({
       '/auth': 'http://127.0.0.1:8100',
       '/documents': 'http://127.0.0.1:8100',
       '/admin': 'http://127.0.0.1:8100',
+      '/boardrooms': 'http://127.0.0.1:8100',
       '/ws': {
         target: 'ws://127.0.0.1:8100',
         ws: true

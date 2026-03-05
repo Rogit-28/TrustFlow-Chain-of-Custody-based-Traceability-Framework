@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { ToastProvider, useToast } from './components/ui/toast';
-import { Shield, LayoutDashboard, FolderOpen, LogOut, User, Share2, Trash2, Crosshair, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Shield, LayoutDashboard, FolderOpen, LogOut, User, Users, Share2, Trash2, Crosshair, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
@@ -11,6 +11,8 @@ import SharedView from './views/SharedView';
 import RecycleBinView from './views/RecycleBinView';
 import AdminDashboard from './views/AdminDashboard';
 import LeakDetectionView from './views/LeakDetectionView';
+import BoardroomView from './views/BoardroomView';
+import BoardroomDetail from './views/BoardroomDetail';
 
 axios.defaults.withCredentials = true;
 
@@ -85,6 +87,7 @@ const MainLayout = ({ children }) => {
     { name: 'Workspace', path: '/', icon: FolderOpen },
     { name: 'Shared', path: '/shared', icon: Share2 },
     { name: 'Recycle Bin', path: '/recycle', icon: Trash2 },
+    { name: 'Inner Circle', path: '/boardroom', icon: Users },
     { name: 'Mission Control', path: '/forensics', icon: Crosshair },
     { name: 'Leak Detection', path: '/leak-detection', icon: Shield },
   ];
@@ -215,6 +218,8 @@ function AppRoutes() {
       <Route path="/" element={<ProtectedRoute><MainLayout><Workspace /></MainLayout></ProtectedRoute>} />
       <Route path="/shared" element={<ProtectedRoute><MainLayout><SharedView /></MainLayout></ProtectedRoute>} />
       <Route path="/recycle" element={<ProtectedRoute><MainLayout><RecycleBinView /></MainLayout></ProtectedRoute>} />
+      <Route path="/boardroom" element={<ProtectedRoute><MainLayout><BoardroomView /></MainLayout></ProtectedRoute>} />
+      <Route path="/boardroom/:id" element={<ProtectedRoute><MainLayout><BoardroomDetail /></MainLayout></ProtectedRoute>} />
       <Route path="/forensics" element={<ProtectedRoute><MainLayout><AdminDashboard /></MainLayout></ProtectedRoute>} />
       <Route path="/leak-detection" element={<ProtectedRoute><MainLayout><LeakDetectionView /></MainLayout></ProtectedRoute>} />
     </Routes>

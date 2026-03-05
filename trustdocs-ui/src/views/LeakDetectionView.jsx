@@ -53,8 +53,8 @@ export default function LeakDetectionView() {
     };
 
     return (
-        <div className="h-full flex flex-col max-w-5xl mx-auto space-y-6 lg:space-y-8">
-            <div className="flex items-center gap-3">
+        <div className="min-h-full flex flex-col w-full space-y-6 lg:space-y-8">
+            <div className="flex items-center gap-3 shrink-0">
                 <Search className="h-7 w-7 text-red-500" />
                 <div>
                     <h1 className="text-2xl font-display font-bold text-white tracking-tight">Leak Detection</h1>
@@ -62,53 +62,7 @@ export default function LeakDetectionView() {
                 </div>
             </div>
 
-            {/* Educational Section */}
-            <Card className="bg-[#050505] border-white/[0.06] overflow-hidden relative">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-red-500/5 blur-3xl pointer-events-none rounded-full -translate-y-1/2 translate-x-1/2" />
-                <CardContent className="p-6 md:p-8">
-                    <div className="flex flex-col md:flex-row gap-8 items-start">
-                        <div className="flex-1 space-y-4 text-sm text-gray-400 leading-relaxed">
-                            <h3 className="text-lg font-display font-semibold text-white flex items-center gap-2 mb-2">
-                                <Fingerprint className="h-5 w-5 text-emerald-500" />
-                                Invisible Tracers
-                            </h3>
-                            <p>
-                                When a document is shared within TrustDocs, it is uniquely watermarked with <strong className="text-gray-200">Zero-Width Characters (ZWCs)</strong>—specifically <code className="bg-white/10 px-1 py-0.5 rounded text-white text-xs">U+200B</code> (Zero-Width Space) and <code className="bg-white/10 px-1 py-0.5 rounded text-white text-xs">U+200C</code> (Zero-Width Non-Joiner).
-                            </p>
-                            <p>
-                                These characters are cryptographically embedded into standard whitespace (like spaces and line breaks) representing binary <code className="text-red-400 font-mono">0</code>s and <code className="text-red-400 font-mono">1</code>s. This creates an invisible payload containing the recipient's unique Peer ID.
-                            </p>
-                            <p>
-                                If an authorized user copies the secure document and pastes it elsewhere (like a public forum, email, or chat application), the invisible payload is carried over with the text. We can extract this payload to attribute the leak directly to the responsible party.
-                            </p>
-                        </div>
-
-                        <div className="w-full md:w-80 bg-black/40 border border-white/[0.04] p-4 rounded-xl flex flex-col gap-3 font-mono text-[10px] shrink-0">
-                            <div className="text-gray-500 mb-1 border-b border-white/[0.04] pb-2 flex items-center justify-between">
-                                <span>Encoding Process</span>
-                                <Code className="h-3 w-3" />
-                            </div>
-                            <div>
-                                <div className="text-emerald-500/70 mb-0.5">Input Text:</div>
-                                <div className="text-gray-300 bg-white/5 p-1.5 rounded">"Project Orion"</div>
-                            </div>
-                            <div>
-                                <div className="text-emerald-500/70 mb-0.5 z-10">ZWC Binary Payload (PeerID):</div>
-                                <div className="text-red-400/80 break-all leading-tight">10110010 01001101</div>
-                            </div>
-                            <div>
-                                <div className="text-emerald-500/70 mb-0.5">Watermarked Text:</div>
-                                <div className="text-white bg-red-500/10 p-1.5 rounded relative group">
-                                    "Project<span className="text-red-500 font-bold group-hover:opacity-100 transition-opacity">_</span>Orion"
-                                    <div className="absolute inset-x-0 -bottom-6 text-center text-[9px] text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">Hover to reveal ZWCs</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch flex-1 pb-6">
 
                 {/* Input Pane */}
                 <Card className="flex flex-col h-full border-white/[0.06] bg-[#050505]">
@@ -234,6 +188,53 @@ export default function LeakDetectionView() {
                     </CardContent>
                 </Card>
             </div>
+
+            {/* Educational Section */}
+            <Card className="bg-[#050505] border-white/[0.06] overflow-hidden relative shrink-0">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-red-500/5 blur-3xl pointer-events-none rounded-full -translate-y-1/2 translate-x-1/2" />
+                <CardContent className="p-6 md:p-8">
+                    <div className="flex flex-col md:flex-row gap-8 items-start">
+                        <div className="flex-1 space-y-4 text-sm text-gray-400 leading-relaxed">
+                            <h3 className="text-lg font-display font-semibold text-white flex items-center gap-2 mb-2">
+                                <Fingerprint className="h-5 w-5 text-emerald-500" />
+                                Invisible Tracers
+                            </h3>
+                            <p>
+                                When a document is shared within TrustDocs, it is uniquely watermarked with <strong className="text-gray-200">Zero-Width Characters (ZWCs)</strong>—specifically <code className="bg-white/10 px-1 py-0.5 rounded text-white text-xs">U+200B</code> (Zero-Width Space) and <code className="bg-white/10 px-1 py-0.5 rounded text-white text-xs">U+200C</code> (Zero-Width Non-Joiner).
+                            </p>
+                            <p>
+                                These characters are cryptographically embedded into standard whitespace (like spaces and line breaks) representing binary <code className="text-red-400 font-mono">0</code>s and <code className="text-red-400 font-mono">1</code>s. This creates an invisible payload containing the recipient's unique Peer ID.
+                            </p>
+                            <p>
+                                If an authorized user copies the secure document and pastes it elsewhere (like a public forum, email, or chat application), the invisible payload is carried over with the text. We can extract this payload to attribute the leak directly to the responsible party.
+                            </p>
+                        </div>
+
+                        <div className="w-full md:w-80 bg-black/40 border border-white/[0.04] p-4 rounded-xl flex flex-col gap-3 font-mono text-[10px] shrink-0">
+                            <div className="text-gray-500 mb-1 border-b border-white/[0.04] pb-2 flex items-center justify-between">
+                                <span>Encoding Process</span>
+                                <Code className="h-3 w-3" />
+                            </div>
+                            <div>
+                                <div className="text-emerald-500/70 mb-0.5">Input Text:</div>
+                                <div className="text-gray-300 bg-white/5 p-1.5 rounded">"Project Orion"</div>
+                            </div>
+                            <div>
+                                <div className="text-emerald-500/70 mb-0.5 z-10">ZWC Binary Payload (PeerID):</div>
+                                <div className="text-red-400/80 break-all leading-tight">10110010 01001101</div>
+                            </div>
+                            <div>
+                                <div className="text-emerald-500/70 mb-0.5">Watermarked Text:</div>
+                                <div className="text-white bg-red-500/10 p-1.5 rounded relative group">
+                                    "Project<span className="text-red-500 font-bold opacity-0 group-hover:opacity-100 transition-opacity">_</span>Orion"
+                                    <div className="absolute inset-x-0 -bottom-6 text-center text-[9px] text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">Hover to reveal ZWCs</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
+
         </div>
     );
 }

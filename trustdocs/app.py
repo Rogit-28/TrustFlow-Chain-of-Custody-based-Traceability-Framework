@@ -54,14 +54,17 @@ from trustdocs.documents.routes import router as documents_router
 from trustdocs.comments import router as comments_router
 from trustdocs.chat import router as chat_router, websocket_document
 from trustdocs.admin import router as admin_router, admin_websocket
+from trustdocs.boardroom.routes import router as boardroom_router
 
 app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(comments_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(boardroom_router)
 
 # ── WebSocket endpoints ──────────────────────────────────────────────────────
+
 
 @app.websocket("/ws/documents/{doc_id}")
 async def ws_document(ws: WebSocket, doc_id: str):
@@ -78,15 +81,25 @@ async def ws_admin(ws: WebSocket):
 _frontend_dir = Path(__file__).resolve().parent.parent / "trustdocs-ui" / "dist"
 
 if _frontend_dir.exists():
-    app.mount("/assets", StaticFiles(directory=str(_frontend_dir / "assets")), name="assets")
+    app.mount(
+        "/assets", StaticFiles(directory=str(_frontend_dir / "assets")), name="assets"
+    )
+
 
 @app.get("/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
 async def serve_frontend(full_path: str):
     """Serve the Vite React frontend. Falls back to index.html for client-side routing."""
     # Whitelist API endpoints to avoid swallowing 404s
-    if full_path.startswith("api/") or full_path.startswith("auth/") or full_path.startswith("documents/") or full_path.startswith("admin/") or full_path.startswith("ws/"):
+    if (
+        full_path.startswith("api/")
+        or full_path.startswith("auth/")
+        or full_path.startswith("documents/")
+        or full_path.startswith("admin/")
+        or full_path.startswith("ws/")
+        or full_path.startswith("boardrooms/")
+    ):
         return HTMLResponse("Not Found", status_code=404)
-        
+
     index_file = _frontend_dir / "index.html"
     if index_file.exists():
         return index_file.read_text(encoding="utf-8")
