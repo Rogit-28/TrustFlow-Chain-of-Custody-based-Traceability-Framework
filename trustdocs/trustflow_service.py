@@ -6,8 +6,9 @@ for direct async method calls from FastAPI route handlers.
 """
 
 import logging
+from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from coc_framework.core.coc_node import CoCNode
 from coc_framework.core.crypto_core import CryptoCore
@@ -177,6 +178,148 @@ class TrustFlowService:
         ]
         return list(nodes_map.values()), edges
 
+    @staticmethod
+    def find_paths_in_edges(
+        edges: List[dict],
+        source: str,
+        target: str,
+        mode: str = "shortest",
+        max_paths: int = 25,
+        max_depth: int = 16,
+    ) -> dict:
+        """Find directed path(s) in an edge list with bounded complexity.
+
+        Args:
+            edges: Directed edges in shape {"from": str, "to": str}.
+            source: Source node hash.
+            target: Target node hash.
+            mode: "shortest" or "all".
+            max_paths: Maximum number of paths to return when mode="all".
+            max_depth: Maximum traversal depth to prevent combinatorial blowups.
+        """
+        if mode not in {"shortest", "all"}:
+            raise ValueError("mode must be 'shortest' or 'all'")
+
+        max_paths = max(1, min(int(max_paths), 200))
+        max_depth = max(1, min(int(max_depth), 64))
+
+        adjacency: Dict[str, Set[str]] = {}
+        for edge in edges:
+            frm = edge.get("from")
+            to = edge.get("to")
+            if not frm or not to:
+                continue
+            adjacency.setdefault(frm, set()).add(to)
+
+        if source == target:
+            return {
+                "mode": mode,
+                "source": source,
+                "target": target,
+                "paths": [{"nodes": [source], "edges": []}],
+                "path_count": 1,
+                "truncated": False,
+            }
+
+        if mode == "shortest":
+            queue = deque([source])
+            parents: Dict[str, str] = {}
+            visited = {source}
+            depth: Dict[str, int] = {source: 0}
+
+            while queue:
+                current = queue.popleft()
+                current_depth = depth.get(current, 0)
+                if current_depth >= max_depth:
+                    continue
+
+                for nxt in adjacency.get(current, set()):
+                    if nxt in visited:
+                        continue
+                    visited.add(nxt)
+                    parents[nxt] = current
+                    depth[nxt] = current_depth + 1
+                    if nxt == target:
+                        queue.clear()
+                        break
+                    queue.append(nxt)
+
+            if target not in parents:
+                return {
+                    "mode": mode,
+                    "source": source,
+                    "target": target,
+                    "paths": [],
+                    "path_count": 0,
+                    "truncated": False,
+                }
+
+            node_path = [target]
+            cursor = target
+            while cursor in parents:
+                cursor = parents[cursor]
+                node_path.append(cursor)
+            node_path.reverse()
+
+            edge_path = [
+                {"from": node_path[i], "to": node_path[i + 1]}
+                for i in range(len(node_path) - 1)
+            ]
+
+            return {
+                "mode": mode,
+                "source": source,
+                "target": target,
+                "paths": [{"nodes": node_path, "edges": edge_path}],
+                "path_count": 1,
+                "truncated": False,
+            }
+
+        collected_paths: List[List[str]] = []
+        truncated = False
+
+        def dfs(current: str, trail: List[str], seen: Set[str]) -> None:
+            nonlocal truncated
+            if truncated:
+                return
+            if len(trail) - 1 > max_depth:
+                return
+            if current == target:
+                collected_paths.append(list(trail))
+                if len(collected_paths) >= max_paths:
+                    truncated = True
+                return
+
+            for nxt in adjacency.get(current, set()):
+                if nxt in seen:
+                    continue
+                seen.add(nxt)
+                trail.append(nxt)
+                dfs(nxt, trail, seen)
+                trail.pop()
+                seen.remove(nxt)
+                if truncated:
+                    return
+
+        dfs(source, [source], {source})
+
+        paths = []
+        for node_path in collected_paths:
+            edge_path = [
+                {"from": node_path[i], "to": node_path[i + 1]}
+                for i in range(len(node_path) - 1)
+            ]
+            paths.append({"nodes": node_path, "edges": edge_path})
+
+        return {
+            "mode": mode,
+            "source": source,
+            "target": target,
+            "paths": paths,
+            "path_count": len(paths),
+            "truncated": truncated,
+        }
+
     async def get_graph_for_peer(self, peer_id: str) -> tuple:
         """Return nodes/edges visible to a specific peer."""
         nodes = await self.storage.get_all_nodes()
@@ -224,6 +367,72 @@ class TrustFlowService:
         unique_edges = [dict(t) for t in {tuple(d.items()) for d in edges}]
 
         return list(final_nodes_map.values()), unique_edges
+
+    async def get_graph_paths_for_peer(
+        self,
+        peer_id: str,
+        source: str,
+        target: str,
+        mode: str = "shortest",
+        max_paths: int = 25,
+        max_depth: int = 16,
+    ) -> dict:
+        """Find path(s) between two nodes for a peer-scoped graph."""
+        nodes, edges = await self.get_graph_for_peer(peer_id)
+        visible_nodes = {n["node_hash"] for n in nodes}
+
+        if source not in visible_nodes or target not in visible_nodes:
+            return {
+                "mode": mode,
+                "source": source,
+                "target": target,
+                "paths": [],
+                "path_count": 0,
+                "truncated": False,
+                "error": "source_or_target_not_visible",
+            }
+
+        return self.find_paths_in_edges(
+            edges=edges,
+            source=source,
+            target=target,
+            mode=mode,
+            max_paths=max_paths,
+            max_depth=max_depth,
+        )
+
+    async def get_graph_paths_for_document(
+        self,
+        root_hash: str,
+        source: str,
+        target: str,
+        mode: str = "shortest",
+        max_paths: int = 25,
+        max_depth: int = 16,
+    ) -> dict:
+        """Find path(s) between two nodes in a single document trace tree."""
+        nodes, edges = await self.get_trace_for_document(root_hash)
+        visible_nodes = {n["node_hash"] for n in nodes}
+
+        if source not in visible_nodes or target not in visible_nodes:
+            return {
+                "mode": mode,
+                "source": source,
+                "target": target,
+                "paths": [],
+                "path_count": 0,
+                "truncated": False,
+                "error": "source_or_target_not_visible",
+            }
+
+        return self.find_paths_in_edges(
+            edges=edges,
+            source=source,
+            target=target,
+            mode=mode,
+            max_paths=max_paths,
+            max_depth=max_depth,
+        )
 
     async def get_node(self, node_hash: str) -> Optional[CoCNode]:
         return await self.storage.get_node(node_hash)

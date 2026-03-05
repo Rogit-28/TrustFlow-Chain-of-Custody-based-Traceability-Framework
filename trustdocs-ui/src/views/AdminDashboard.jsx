@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { useToast } from '../components/ui/toast';
-import { Shield, Network, Activity, Search, ShieldAlert, CheckCircle2, XCircle, FileText, Share2, Info, Maximize2, Minimize2 } from 'lucide-react';
+import { Shield, Network, Activity, Search, ShieldAlert, CheckCircle2, XCircle, FileText, Share2, Info, Maximize2, Minimize2, Crosshair, CornerDownRight } from 'lucide-react';
 import { Network as VisNetwork } from 'vis-network';
+import { DataSet } from 'vis-data';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
@@ -17,6 +18,12 @@ export default function AdminDashboard() {
     const [selectedDoc, setSelectedDoc] = useState('');
     const [selectedDocName, setSelectedDocName] = useState('');
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [pathStatus, setPathStatus] = useState(null);
+    const [pathModeEnabled, setPathModeEnabled] = useState(false);
+    const [pathComputeMode, setPathComputeMode] = useState('shortest');
+    const [pathSource, setPathSource] = useState(null);       // { id, label }
+    const [pathTarget, setPathTarget] = useState(null);       // { id, label }
+    const [isPathLoading, setIsPathLoading] = useState(false);
 
     // File Trace search state
     const [fileSearchQuery, setFileSearchQuery] = useState('');
@@ -25,14 +32,328 @@ export default function AdminDashboard() {
 
     const graphRef = useRef(null);
     const networkRef = useRef(null);
+    const nodesDatasetRef = useRef(null);
+    const edgesDatasetRef = useRef(null);
+    const baseGraphRef = useRef({ nodes: [], edges: [] });
+    const pathOverlayRef = useRef({ nodeIds: new Set(), edgeKeys: new Set() });
+    const nodeMetaRef = useRef(new Map());    // id -> { label, ownerUsername }
+    const pathModeRef = useRef(false);
+    const pathSourceRef = useRef(null);
+    const pathTargetRef = useRef(null);
     const toast = useToast();
+
+    const edgeKey = (from, to) => `${from}->${to}`;
+
+    // ── Visual style application (updates DataSet in-place, no setData) ──
+
+    const applyVisualOverlay = useCallback(() => {
+        const nodesDs = nodesDatasetRef.current;
+        const edgesDs = edgesDatasetRef.current;
+        if (!nodesDs || !edgesDs) return;
+
+        const { nodes: baseNodes, edges: baseEdges } = baseGraphRef.current;
+        const pathNodeSet = pathOverlayRef.current.nodeIds;
+        const pathEdgeSet = pathOverlayRef.current.edgeKeys;
+        const hasPath = pathNodeSet.size > 0;
+
+        const pathHighlight = {
+            border: '#f59e0b',
+            bg: 'rgba(245,158,11,0.15)',
+            font: '#fbbf24',
+            edge: 'rgba(245,158,11,0.9)',
+        };
+
+        const sourceId = pathSourceRef.current?.id;
+        const targetId = pathTargetRef.current?.id;
+
+        // Batch node updates
+        const nodeUpdates = baseNodes.map((base) => {
+            // Path highlight takes priority
+            if (hasPath && pathNodeSet.has(base.id)) {
+                // Source node gets distinct red, target gets amber
+                if (base.id === sourceId) {
+                    return {
+                        id: base.id,
+                        color: {
+                            border: '#ff073a',
+                            background: 'rgba(255,7,58,0.2)',
+                            highlight: { background: 'rgba(255,7,58,0.24)', border: '#ff073a' },
+                            hover: { background: 'rgba(255,7,58,0.22)', border: '#ff073a' },
+                        },
+                        font: { ...base.font, color: '#ff8da2' },
+                        borderWidth: 3,
+                        shadow: { enabled: true, color: 'rgba(255,7,58,0.35)', size: 18 },
+                    };
+                }
+                if (base.id === targetId) {
+                    return {
+                        id: base.id,
+                        color: {
+                            border: '#10b981',
+                            background: 'rgba(16,185,129,0.15)',
+                            highlight: { background: 'rgba(16,185,129,0.2)', border: '#10b981' },
+                            hover: { background: 'rgba(16,185,129,0.18)', border: '#10b981' },
+                        },
+                        font: { ...base.font, color: '#6ee7b7' },
+                        borderWidth: 3,
+                        shadow: { enabled: true, color: 'rgba(16,185,129,0.35)', size: 18 },
+                    };
+                }
+                return {
+                    id: base.id,
+                    color: {
+                        border: pathHighlight.border,
+                        background: pathHighlight.bg,
+                        highlight: { background: pathHighlight.bg, border: pathHighlight.border },
+                        hover: { background: pathHighlight.bg, border: pathHighlight.border },
+                    },
+                    font: { ...base.font, color: pathHighlight.font },
+                    borderWidth: 3,
+                    shadow: { enabled: true, color: 'rgba(245,158,11,0.35)', size: 18 },
+                };
+            }
+
+            // Source/target markers without active path
+            if (base.id === sourceId) {
+                return {
+                    id: base.id,
+                    color: {
+                        border: '#ff073a',
+                        background: 'rgba(255,7,58,0.15)',
+                        highlight: { background: 'rgba(255,7,58,0.2)', border: '#ff073a' },
+                        hover: { background: 'rgba(255,7,58,0.18)', border: '#ff073a' },
+                    },
+                    font: { ...base.font, color: '#ff8da2' },
+                    borderWidth: 3,
+                    shadow: base.shadow,
+                };
+            }
+            if (base.id === targetId) {
+                return {
+                    id: base.id,
+                    color: {
+                        border: '#10b981',
+                        background: 'rgba(16,185,129,0.12)',
+                        highlight: { background: 'rgba(16,185,129,0.18)', border: '#10b981' },
+                        hover: { background: 'rgba(16,185,129,0.15)', border: '#10b981' },
+                    },
+                    font: { ...base.font, color: '#6ee7b7' },
+                    borderWidth: 3,
+                    shadow: base.shadow,
+                };
+            }
+
+            // Dim non-path nodes when a path is active
+            if (hasPath) {
+                return {
+                    id: base.id,
+                    color: {
+                        border: 'rgba(255,255,255,0.06)',
+                        background: 'rgba(255,255,255,0.015)',
+                        highlight: { background: 'rgba(255,255,255,0.03)', border: 'rgba(255,255,255,0.1)' },
+                        hover: { background: 'rgba(255,255,255,0.03)', border: 'rgba(255,255,255,0.1)' },
+                    },
+                    font: { ...base.font, color: '#374151' },
+                    borderWidth: base.borderWidth,
+                    shadow: { enabled: false },
+                };
+            }
+
+            // Default: restore base style
+            return {
+                id: base.id,
+                color: base.color,
+                font: base.font,
+                borderWidth: base.borderWidth,
+                shadow: base.shadow,
+            };
+        });
+
+        // Batch edge updates
+        const edgeUpdates = baseEdges.map((base) => {
+            if (hasPath && pathEdgeSet.has(edgeKey(base.from, base.to))) {
+                return {
+                    id: base.id,
+                    color: { color: pathHighlight.edge, highlight: pathHighlight.edge, hover: pathHighlight.edge },
+                    width: 3,
+                };
+            }
+            if (hasPath) {
+                return {
+                    id: base.id,
+                    color: { color: 'rgba(255,255,255,0.03)', highlight: 'rgba(255,255,255,0.04)', hover: 'rgba(255,255,255,0.04)' },
+                    width: 0.7,
+                };
+            }
+            return {
+                id: base.id,
+                color: base.color,
+                width: base.width,
+            };
+        });
+
+        nodesDs.update(nodeUpdates);
+        edgesDs.update(edgeUpdates);
+    }, []);
+
+    // ── Path resolution ──
+
+    const resolvePathFromApi = useCallback(async (source, target, computeMode) => {
+        if (!source || !target) return;
+
+        setIsPathLoading(true);
+        try {
+            const params = {
+                source: source.id,
+                target: target.id,
+                mode: computeMode,
+                scope: activeGraph === 'my' ? 'my' : 'file',
+                max_paths: computeMode === 'all' ? 50 : 1,
+                max_depth: 24,
+            };
+            if (activeGraph === 'file') {
+                params.document_id = selectedDoc;
+            }
+
+            const res = await axios.get('/admin/graph/path', { params });
+            const payload = res.data;
+            const allPathNodes = new Set();
+            const allPathEdges = new Set();
+
+            payload.paths.forEach((p) => {
+                p.nodes.forEach((n) => allPathNodes.add(n));
+                p.edges.forEach((e) => allPathEdges.add(edgeKey(e.from_node, e.to_node)));
+            });
+
+            pathOverlayRef.current = { nodeIds: allPathNodes, edgeKeys: allPathEdges };
+
+            if (payload.path_count > 0) {
+                const shortestPath = payload.paths.reduce((best, current) => {
+                    if (!best) return current;
+                    return current.nodes.length < best.nodes.length ? current : best;
+                }, null);
+                setPathStatus({
+                    found: true,
+                    mode: payload.mode,
+                    pathCount: payload.path_count,
+                    truncated: payload.truncated,
+                    hops: shortestPath ? Math.max(shortestPath.nodes.length - 1, 0) : 0,
+                });
+            } else {
+                setPathStatus({
+                    found: false,
+                    mode: payload.mode,
+                    pathCount: 0,
+                    truncated: payload.truncated,
+                    hops: 0,
+                });
+            }
+
+            applyVisualOverlay();
+        } catch (err) {
+            pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+            setPathStatus(null);
+            applyVisualOverlay();
+            toast({
+                title: 'Path lookup failed',
+                description: err.response?.data?.detail || err.message,
+                type: 'error',
+            });
+        } finally {
+            setIsPathLoading(false);
+        }
+    }, [activeGraph, selectedDoc, applyVisualOverlay, toast]);
+
+    // ── Click-to-assign source/target in path mode ──
+
+    const handleNodeClick = useCallback((nodeId) => {
+        if (!pathModeRef.current) return;
+        if (!nodeId) return;
+
+        const meta = nodeMetaRef.current.get(nodeId);
+        const nodeInfo = meta
+            ? { id: nodeId, label: `${meta.ownerUsername} · ${nodeId.substring(0, 8)}` }
+            : { id: nodeId, label: nodeId.substring(0, 12) };
+
+        const currentSource = pathSourceRef.current;
+        const currentTarget = pathTargetRef.current;
+
+        // If clicking the same node that's already source, remove it
+        if (currentSource?.id === nodeId) {
+            pathSourceRef.current = null;
+            setPathSource(null);
+            pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+            setPathStatus(null);
+            applyVisualOverlay();
+            return;
+        }
+        // If clicking the same node that's already target, remove it
+        if (currentTarget?.id === nodeId) {
+            pathTargetRef.current = null;
+            setPathTarget(null);
+            pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+            setPathStatus(null);
+            applyVisualOverlay();
+            return;
+        }
+
+        // If no source yet, assign as source
+        if (!currentSource) {
+            pathSourceRef.current = nodeInfo;
+            setPathSource(nodeInfo);
+            applyVisualOverlay();
+            return;
+        }
+
+        // If source exists but no target, assign as target and resolve
+        if (!currentTarget) {
+            pathTargetRef.current = nodeInfo;
+            setPathTarget(nodeInfo);
+            applyVisualOverlay();
+            resolvePathFromApi(currentSource, nodeInfo, pathComputeMode);
+            return;
+        }
+
+        // Both exist: replace target and re-resolve
+        pathTargetRef.current = nodeInfo;
+        setPathTarget(nodeInfo);
+        pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+        applyVisualOverlay();
+        resolvePathFromApi(currentSource, nodeInfo, pathComputeMode);
+    }, [pathComputeMode, applyVisualOverlay, resolvePathFromApi]);
+
+    const clearPathState = useCallback(() => {
+        pathSourceRef.current = null;
+        pathTargetRef.current = null;
+        setPathSource(null);
+        setPathTarget(null);
+        pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+        setPathStatus(null);
+        applyVisualOverlay();
+    }, [applyVisualOverlay]);
+
+    const swapSourceTarget = useCallback(() => {
+        const oldSource = pathSourceRef.current;
+        const oldTarget = pathTargetRef.current;
+        pathSourceRef.current = oldTarget;
+        pathTargetRef.current = oldSource;
+        setPathSource(oldTarget);
+        setPathTarget(oldSource);
+        pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+        setPathStatus(null);
+        applyVisualOverlay();
+        if (oldTarget && oldSource) {
+            resolvePathFromApi(oldTarget, oldSource, pathComputeMode);
+        }
+    }, [pathComputeMode, applyVisualOverlay, resolvePathFromApi]);
+
+    // ── Data fetching ──
 
     const fetchPeers = async () => { try { const res = await axios.get('/admin/peers'); setPeers(res.data); } catch { } };
 
     const fetchDocuments = async () => {
         try {
             const res = await axios.get('/documents');
-            // Only include docs with shares for File Trace
             const owned = res.data.owned || [];
             setDocuments(owned);
         } catch { }
@@ -50,11 +371,21 @@ export default function AdminDashboard() {
             const res = await axios.get(endpoint);
             const { nodes, edges } = res.data;
 
+            // Build node metadata map for click-to-assign labels
+            const metaMap = new Map();
+            nodes.forEach((n) => {
+                metaMap.set(n.node_hash, {
+                    ownerUsername: n.owner_username,
+                    filename: n.filename || '',
+                });
+            });
+            nodeMetaRef.current = metaMap;
+
             const vNodes = nodes.map(n => ({
                 id: n.node_hash,
                 label: n.parent_hash
                     ? `${n.owner_username}\n${n.node_hash.substring(0, 6)}`
-                    : `${n.owner_username}\n${n.filename ? n.filename.substring(0, 15) + '…' : ''}\n${n.node_hash.substring(0, 6)}`,
+                    : `${n.owner_username}\n${n.filename ? n.filename.substring(0, 15) + '\u2026' : ''}\n${n.node_hash.substring(0, 6)}`,
                 color: {
                     background: n.is_online ? 'rgba(16,185,129,0.1)' : (n.parent_hash ? 'rgba(255,255,255,0.04)' : 'rgba(255,7,58,0.08)'),
                     border: n.is_online ? '#10b981' : (n.parent_hash ? 'rgba(255,255,255,0.2)' : '#ff073a'),
@@ -69,18 +400,63 @@ export default function AdminDashboard() {
             }));
 
             const vEdges = edges.map((e, i) => ({
-                id: i, from: e.from, to: e.to, arrows: 'to',
+                id: `e-${i}`,
+                from: e.from,
+                to: e.to,
+                arrows: 'to',
                 color: { color: 'rgba(255,255,255,0.08)', highlight: '#ff073a', hover: 'rgba(255,7,58,0.3)' },
                 smooth: { type: 'curvedCW', roundness: 0.15 },
                 width: 1
             }));
 
+            // Store base styles for overlay calculations
+            baseGraphRef.current = { nodes: vNodes, edges: vEdges };
+
+            // Reset path state on graph reload
+            pathSourceRef.current = null;
+            pathTargetRef.current = null;
+            setPathSource(null);
+            setPathTarget(null);
+            pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() };
+            setPathStatus(null);
+
+            const nodesDs = new DataSet(vNodes);
+            const edgesDs = new DataSet(vEdges);
+            nodesDatasetRef.current = nodesDs;
+            edgesDatasetRef.current = edgesDs;
+
             if (networkRef.current) {
-                networkRef.current.setData({ nodes: vNodes, edges: vEdges });
+                networkRef.current.setData({ nodes: nodesDs, edges: edgesDs });
             } else if (graphRef.current) {
-                networkRef.current = new VisNetwork(graphRef.current, { nodes: vNodes, edges: vEdges }, {
-                    physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -50, springLength: 100 } },
-                    interaction: { hover: true, tooltipDelay: 200 }
+                networkRef.current = new VisNetwork(graphRef.current, { nodes: nodesDs, edges: edgesDs }, {
+                    physics: {
+                        solver: 'forceAtlas2Based',
+                        forceAtlas2Based: { gravitationalConstant: -50, springLength: 100 },
+                        stabilization: { iterations: 150 },
+                    },
+                    interaction: {
+                        hover: true,
+                        tooltipDelay: 200,
+                        multiselect: true,
+                        selectConnectedEdges: false,
+                        keyboard: false,
+                    },
+                    nodes: {
+                        chosen: true,
+                    },
+                    edges: {
+                        chosen: true,
+                    },
+                });
+            }
+
+            // (Re-)attach event listeners
+            if (networkRef.current) {
+                networkRef.current.off('click');
+                networkRef.current.on('click', (params) => {
+                    if (params.nodes.length === 1) {
+                        handleNodeClick(params.nodes[0]);
+                    }
                 });
             }
         } catch { toast({ title: 'Graph load failed', type: 'error' }); }
@@ -88,6 +464,16 @@ export default function AdminDashboard() {
 
     useEffect(() => { fetchPeers(); fetchDocuments(); }, []);
     useEffect(() => { if (activeGraph === 'my' || selectedDoc) loadGraph(); }, [activeGraph, selectedDoc]);
+
+    // Keep pathModeRef in sync
+    useEffect(() => { pathModeRef.current = pathModeEnabled; }, [pathModeEnabled]);
+
+    // Re-resolve when compute mode changes (if both endpoints set)
+    useEffect(() => {
+        if (pathModeEnabled && pathSourceRef.current && pathTargetRef.current) {
+            resolvePathFromApi(pathSourceRef.current, pathTargetRef.current, pathComputeMode);
+        }
+    }, [pathComputeMode]);
 
     // Close file picker on outside click
     useEffect(() => {
@@ -109,6 +495,15 @@ export default function AdminDashboard() {
         setShowFilePicker(false);
         setFileSearchQuery('');
     };
+
+    // ── Helpers for path mode UI ──
+    const sourceLabel = pathSource ? pathSource.label : null;
+    const targetLabel = pathTarget ? pathTarget.label : null;
+    const pathAssignHint = !pathSource
+        ? 'Click a node to set Source'
+        : !pathTarget
+            ? 'Click another node to set Target'
+            : null;
 
     return (
         <div className="h-full flex flex-col">
@@ -137,9 +532,101 @@ export default function AdminDashboard() {
                             </div>
                         </div>
                         <div className="flex items-center gap-1 mt-3 bg-[#050505] p-1 rounded-lg w-max border border-white/[0.04] shadow-inner">
-                            <Button size="sm" variant={activeGraph === 'my' ? 'secondary' : 'ghost'} onClick={() => { setActiveGraph('my'); setSelectedDoc(''); setSelectedDocName(''); }} className={`px-4 rounded-md transition-all duration-300 ${activeGraph === 'my' ? 'bg-white/[0.08] shadow-[0_2px_10px_rgba(0,0,0,0.5)] border border-white/10' : 'hover:bg-white/[0.03] text-gray-500'}`}>My Network</Button>
-                            <Button size="sm" variant={activeGraph === 'file' ? 'secondary' : 'ghost'} onClick={() => { setActiveGraph('file'); setSelectedDoc(''); setSelectedDocName(''); if (networkRef.current) networkRef.current.setData({ nodes: [], edges: [] }); }} className={`px-4 rounded-md transition-all duration-300 ${activeGraph === 'file' ? 'bg-white/[0.08] shadow-[0_2px_10px_rgba(0,0,0,0.5)] border border-white/10' : 'hover:bg-white/[0.03] text-gray-500'}`}>File Trace</Button>
+                            <Button size="sm" variant={activeGraph === 'my' ? 'secondary' : 'ghost'} onClick={() => { setActiveGraph('my'); setSelectedDoc(''); setSelectedDocName(''); clearPathState(); }} className={`px-4 rounded-md transition-all duration-300 ${activeGraph === 'my' ? 'bg-white/[0.08] shadow-[0_2px_10px_rgba(0,0,0,0.5)] border border-white/10' : 'hover:bg-white/[0.03] text-gray-500'}`}>My Network</Button>
+                            <Button size="sm" variant={activeGraph === 'file' ? 'secondary' : 'ghost'} onClick={() => { setActiveGraph('file'); setSelectedDoc(''); setSelectedDocName(''); clearPathState(); if (networkRef.current) { const emptyN = new DataSet(); const emptyE = new DataSet(); nodesDatasetRef.current = emptyN; edgesDatasetRef.current = emptyE; networkRef.current.setData({ nodes: emptyN, edges: emptyE }); } }} className={`px-4 rounded-md transition-all duration-300 ${activeGraph === 'file' ? 'bg-white/[0.08] shadow-[0_2px_10px_rgba(0,0,0,0.5)] border border-white/10' : 'hover:bg-white/[0.03] text-gray-500'}`}>File Trace</Button>
                         </div>
+
+                        {/* Toolbar row */}
+                        <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-gray-500">
+                            <Button
+                                size="sm"
+                                variant={pathModeEnabled ? 'secondary' : 'ghost'}
+                                className={`h-6 px-2.5 text-[10px] gap-1.5 ${pathModeEnabled ? 'bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/15' : ''}`}
+                                onClick={() => {
+                                    const next = !pathModeEnabled;
+                                    setPathModeEnabled(next);
+                                    if (!next) clearPathState();
+                                }}
+                            >
+                                <Crosshair className="h-3 w-3" />
+                                {pathModeEnabled ? 'Pathfinder: ON' : 'Pathfinder'}
+                            </Button>
+
+                            {pathModeEnabled && (
+                                <>
+                                    <div className="h-3 w-px bg-white/[0.08]" />
+                                    <Button size="sm" variant={pathComputeMode === 'shortest' ? 'secondary' : 'ghost'} className="h-6 px-2 text-[10px]" onClick={() => setPathComputeMode('shortest')}>Shortest</Button>
+                                    <Button size="sm" variant={pathComputeMode === 'all' ? 'secondary' : 'ghost'} className="h-6 px-2 text-[10px]" onClick={() => setPathComputeMode('all')}>All paths</Button>
+                                </>
+                            )}
+
+                            {pathStatus?.found && (
+                                <span className="px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                                    {pathStatus.mode === 'all'
+                                        ? `${pathStatus.pathCount} path(s) found`
+                                        : `Shortest path: ${pathStatus.hops} hop${pathStatus.hops !== 1 ? 's' : ''}`}
+                                    {pathStatus.truncated ? ' (truncated)' : ''}
+                                </span>
+                            )}
+                            {pathStatus && !pathStatus.found && (
+                                <span className="px-2 py-1 rounded border border-gray-500/30 bg-gray-500/10 text-gray-400">No path found</span>
+                            )}
+                            {isPathLoading && (
+                                <span className="px-2 py-1 rounded border border-white/[0.06] bg-white/[0.02] text-gray-400 animate-pulse">Resolving...</span>
+                            )}
+                        </div>
+
+                        {/* Path mode: source/target assignment bar */}
+                        <AnimatePresence>
+                            {pathModeEnabled && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    exit={{ opacity: 0, height: 0 }}
+                                    className="overflow-hidden"
+                                >
+                                    <div className="mt-3 flex items-center gap-2 p-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02]">
+                                        {/* Source badge */}
+                                        <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] min-w-0 ${sourceLabel ? 'border border-red-500/30 bg-red-500/10 text-red-300' : 'border border-dashed border-white/[0.1] text-gray-600'}`}>
+                                            <span className="text-[9px] uppercase tracking-wider font-medium shrink-0 opacity-60">S</span>
+                                            <span className="truncate">{sourceLabel || 'Click node...'}</span>
+                                            {sourceLabel && (
+                                                <button onClick={() => { pathSourceRef.current = null; setPathSource(null); pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() }; setPathStatus(null); applyVisualOverlay(); }} className="ml-1 text-red-500/60 hover:text-red-400 shrink-0">&times;</button>
+                                            )}
+                                        </div>
+
+                                        {/* Arrow / swap */}
+                                        <button
+                                            onClick={swapSourceTarget}
+                                            disabled={!sourceLabel && !targetLabel}
+                                            className="text-gray-600 hover:text-gray-400 disabled:opacity-30 transition-colors px-0.5"
+                                            title="Swap source and target"
+                                        >
+                                            <CornerDownRight className="h-3.5 w-3.5" />
+                                        </button>
+
+                                        {/* Target badge */}
+                                        <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] min-w-0 ${targetLabel ? 'border border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border border-dashed border-white/[0.1] text-gray-600'}`}>
+                                            <span className="text-[9px] uppercase tracking-wider font-medium shrink-0 opacity-60">T</span>
+                                            <span className="truncate">{targetLabel || 'Click node...'}</span>
+                                            {targetLabel && (
+                                                <button onClick={() => { pathTargetRef.current = null; setPathTarget(null); pathOverlayRef.current = { nodeIds: new Set(), edgeKeys: new Set() }; setPathStatus(null); applyVisualOverlay(); }} className="ml-1 text-emerald-500/60 hover:text-emerald-400 shrink-0">&times;</button>
+                                            )}
+                                        </div>
+
+                                        <div className="flex-1" />
+
+                                        {pathAssignHint && (
+                                            <span className="text-[10px] text-gray-600 italic">{pathAssignHint}</span>
+                                        )}
+
+                                        {(sourceLabel || targetLabel) && (
+                                            <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-gray-500" onClick={clearPathState}>Clear</Button>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
 
                         {/* File Trace: Search picker */}
                         <AnimatePresence mode="wait">
@@ -209,11 +696,19 @@ export default function AdminDashboard() {
                             </div>
                         )}
                     </CardContent>
-                    <CardContent className="border-t border-white/[0.04] py-3 text-[10px] text-gray-500 flex items-center gap-4">
+                    <CardContent className="border-t border-white/[0.04] py-3 text-[10px] text-gray-500 flex items-center gap-4 flex-wrap">
                         <div className="flex items-center gap-1"><span className="h-2 w-2 bg-red-500 rounded-full" /> Root</div>
                         <div className="flex items-center gap-1"><span className="h-2 w-2 bg-white/40 rounded-full" /> Share</div>
                         <div className="flex items-center gap-1"><span className="h-2 w-2 bg-emerald-500 rounded-full" /> Online</div>
                         <div className="flex items-center gap-1"><span className="h-2 w-2 bg-gray-500 rounded-full" /> Offline</div>
+                        <div className="flex items-center gap-1"><span className="h-2 w-2 bg-amber-400 rounded-full" /> Path</div>
+                        {pathModeEnabled && (
+                            <>
+                                <div className="h-2 w-px bg-white/[0.08]" />
+                                <div className="flex items-center gap-1"><span className="h-2 w-2 rounded-full border border-red-500 bg-red-500/20" /> Source</div>
+                                <div className="flex items-center gap-1"><span className="h-2 w-2 rounded-full border border-emerald-500 bg-emerald-500/20" /> Target</div>
+                            </>
+                        )}
                     </CardContent>
                 </Card>
 

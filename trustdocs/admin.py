@@ -45,6 +45,25 @@ class IntegrityResponse(BaseModel):
     chain_length: int
 
 
+class PathEdge(BaseModel):
+    from_node: str
+    to_node: str
+
+
+class GraphPath(BaseModel):
+    nodes: List[str]
+    edges: List[PathEdge]
+
+
+class GraphPathResponse(BaseModel):
+    mode: str
+    source: str
+    target: str
+    path_count: int
+    truncated: bool = False
+    paths: List[GraphPath]
+
+
 class LeakDetectRequest(BaseModel):
     content: str
     candidate_peer_ids: Optional[List[str]] = None
@@ -102,6 +121,90 @@ async def get_my_graph(user: dict = Depends(get_current_user)):
     """User-scoped CoC graph for current user's peer."""
     nodes, edges = await trustflow.get_graph_for_peer(user["peer_id"])
     return GraphResponse(nodes=nodes, edges=edges)
+
+
+@router.get("/graph/path", response_model=GraphPathResponse)
+async def get_graph_path(
+    source: str,
+    target: str,
+    mode: str = "shortest",
+    scope: str = "my",
+    document_id: Optional[str] = None,
+    max_paths: int = 25,
+    max_depth: int = 16,
+    user: dict = Depends(get_current_user),
+):
+    """Find directed path(s) in peer graph or document trace graph.
+
+    Scope options:
+    - my: current user's visible graph
+    - file: single document trace graph, requires document_id
+    """
+    if mode not in {"shortest", "all"}:
+        raise HTTPException(400, "mode must be 'shortest' or 'all'")
+    if scope not in {"my", "file"}:
+        raise HTTPException(400, "scope must be 'my' or 'file'")
+
+    if scope == "my":
+        result = await trustflow.get_graph_paths_for_peer(
+            peer_id=user["peer_id"],
+            source=source,
+            target=target,
+            mode=mode,
+            max_paths=max_paths,
+            max_depth=max_depth,
+        )
+    else:
+        if not document_id:
+            raise HTTPException(400, "document_id is required for scope='file'")
+
+        doc = await db.find_one("documents", id=document_id)
+        if not doc or doc["status"] in {"deleted", "recycled"}:
+            raise HTTPException(404, "Document not found")
+
+        is_owner = str(doc["owner_id"]) == str(user["id"])
+        if not is_owner:
+            share = await db.find_one(
+                "file_shares",
+                document_id=document_id,
+                recipient_id=user["id"],
+                status="active",
+            )
+            if not share:
+                raise HTTPException(403, "Access denied")
+
+        result = await trustflow.get_graph_paths_for_document(
+            root_hash=doc["coc_node_hash"],
+            source=source,
+            target=target,
+            mode=mode,
+            max_paths=max_paths,
+            max_depth=max_depth,
+        )
+
+    if result.get("error") == "source_or_target_not_visible":
+        raise HTTPException(404, "Source or target node is not visible in this graph")
+
+    response_paths = []
+    for path in result.get("paths", []):
+        response_paths.append(
+            GraphPath(
+                nodes=path["nodes"],
+                edges=[
+                    PathEdge(from_node=edge["from"], to_node=edge["to"])
+                    for edge in path["edges"]
+                ],
+            )
+        )
+
+    return GraphPathResponse(
+        mode=result["mode"],
+        source=result["source"],
+        target=result["target"],
+        path_count=result["path_count"],
+        truncated=result.get("truncated", False),
+        paths=response_paths,
+    )
 
 
 @router.post("/verify-log", response_model=IntegrityResponse)
