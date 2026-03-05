@@ -6,11 +6,21 @@ import { Input } from '../components/ui/input';
 import { useToast } from '../components/ui/toast';
 import { formatBytes } from '../lib/utils';
 import {
-    FileText, Share2, Download, Hash, Users, Activity, FolderOpen, User
+    FileText, Share2, Download, Hash, Users, Activity, FolderOpen, User, Star
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import GlobalSearch from '../components/GlobalSearch';
+
+// ── Pin helpers (localStorage) ──────────────────────────
+const PIN_KEY = 'trustdocs_pinned';
+const getPinned = () => { try { return JSON.parse(localStorage.getItem(PIN_KEY) || '[]'); } catch { return []; } };
+const togglePin = (id) => {
+    const pinned = getPinned();
+    const next = pinned.includes(id) ? pinned.filter(p => p !== id) : [...pinned, id];
+    localStorage.setItem(PIN_KEY, JSON.stringify(next));
+    return next;
+};
 
 export default function SharedView() {
     const [docs, setDocs] = useState([]);
@@ -18,6 +28,7 @@ export default function SharedView() {
     const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const [selectedDoc, setSelectedDoc] = useState(null);
     const [shareUsername, setShareUsername] = useState('');
+    const [pinnedIds, setPinnedIds] = useState(getPinned());
     const toast = useToast();
     const location = useLocation();
     const docRefs = useRef({});
@@ -68,6 +79,12 @@ export default function SharedView() {
         } catch (err) { toast({ title: 'Share failed', description: err.response?.data?.detail || err.message, type: 'error' }); }
     };
 
+    const handleTogglePin = (doc, e) => {
+        e.stopPropagation();
+        const next = togglePin(doc.id);
+        setPinnedIds(next);
+    };
+
     return (
         <div className="h-full flex flex-col">
             <div className="mb-6">
@@ -100,7 +117,10 @@ export default function SharedView() {
                                         <div className="p-1.5 bg-white/[0.04] rounded-md">
                                             <FileText className="h-5 w-5 text-gray-500" />
                                         </div>
-                                        <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border text-emerald-400/80 border-emerald-500/20 bg-emerald-500/5">Shared</span>
+                                        <div className="flex items-center gap-1">
+                                            {pinnedIds.includes(doc.id) && <Star className="h-3 w-3 text-amber-500 fill-amber-500" />}
+                                            <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border text-emerald-400/80 border-emerald-500/20 bg-emerald-500/5">Shared</span>
+                                        </div>
                                     </div>
                                     <h3 className="font-medium text-sm text-gray-200 truncate mb-1">{doc.filename}</h3>
                                     <div className="text-[10px] text-gray-600 font-mono mb-3 truncate flex items-center gap-1">
@@ -111,7 +131,10 @@ export default function SharedView() {
                                     </div>
                                 </CardContent>
                                 <div className="border-t border-white/[0.04] bg-black/40 p-1.5 flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => handleDownload(doc)}><Download className="h-3.5 w-3.5" /></Button>
+                                    <Button size="icon" variant="ghost" className={`h-7 w-7 transition-colors ${pinnedIds.includes(doc.id) ? 'text-amber-500 hover:bg-amber-500/10' : ''}`} onClick={(e) => handleTogglePin(doc, e)} title={pinnedIds.includes(doc.id) ? "Unpin" : "Pin"}>
+                                        <Star className={`h-3.5 w-3.5 ${pinnedIds.includes(doc.id) ? 'fill-amber-500' : ''}`} />
+                                    </Button>
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); handleDownload(doc); }}><Download className="h-3.5 w-3.5" /></Button>
                                     <Button size="icon" variant="ghost" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); setSelectedDoc(doc); setIsShareModalOpen(true); }}><Share2 className="h-3.5 w-3.5" /></Button>
                                 </div>
                             </Card>

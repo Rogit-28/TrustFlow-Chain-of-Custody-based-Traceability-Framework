@@ -130,9 +130,12 @@ async def _create_tables():
     CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
     CREATE INDEX IF NOT EXISTS idx_file_shares_doc ON file_shares(document_id);
     CREATE INDEX IF NOT EXISTS idx_file_shares_recipient ON file_shares(recipient_id);
+    CREATE INDEX IF NOT EXISTS idx_file_shares_status ON file_shares(status);
+    CREATE INDEX IF NOT EXISTS idx_fs_access ON file_shares(document_id, recipient_id, status);
     CREATE INDEX IF NOT EXISTS idx_messages_doc ON messages(document_id);
     CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_message_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
     CREATE TABLE IF NOT EXISTS coc_nodes (
         node_hash TEXT PRIMARY KEY,

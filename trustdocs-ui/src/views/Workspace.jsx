@@ -53,7 +53,8 @@ export default function Workspace() {
         setIsLoading(true);
         try {
             const res = await axios.get('/documents');
-            setDocs(res.data.owned || []);
+            const allDocs = [...(res.data.owned || []), ...(res.data.shared_with_me || [])];
+            setDocs(allDocs);
         } catch (err) {
             toast({ title: 'Error loading workspace', description: err.message, type: 'error' });
         } finally {
@@ -129,10 +130,16 @@ export default function Workspace() {
 
     // Split docs
     const pinnedDocs = docs.filter(d => pinnedIds.includes(d.id));
-    const unpinnedDocs = docs.filter(d => !pinnedIds.includes(d.id));
+    const unpinnedDocs = docs.filter(d => !pinnedIds.includes(d.id) && d.is_owner);
 
     const renderDocCard = (doc) => {
         const isPinned = pinnedIds.includes(doc.id);
+        const isShared = !doc.is_owner;
+        const tagText = isShared ? 'Shared' : 'Owner';
+        const tagClasses = isShared
+            ? 'text-emerald-400/80 border-emerald-500/20 bg-emerald-500/5'
+            : 'text-white/60 border-white/10 bg-white/[0.04]';
+
         return (
             <motion.div key={doc.id} ref={el => docRefs.current[doc.id] = el} variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}>
                 <Card className="group cursor-pointer border-white/[0.04] bg-[#050505] hover:bg-[#0a0a0a] hover:border-white/[0.12] hover:-translate-y-1 hover:shadow-[0_12px_40px_-10px_rgba(0,0,0,0.8)] transition-all duration-300 relative h-full flex flex-col"
@@ -145,7 +152,7 @@ export default function Workspace() {
                             </div>
                             <div className="flex items-center gap-1">
                                 {isPinned && <Star className="h-3 w-3 text-amber-500 fill-amber-500" />}
-                                <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border text-white/60 border-white/10 bg-white/[0.04]">Owner</span>
+                                <span className={`text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border ${tagClasses}`}>{tagText}</span>
                             </div>
                         </div>
                         <h3 className="font-medium text-sm text-gray-200 truncate mb-1">{doc.filename}</h3>

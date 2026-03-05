@@ -11,10 +11,7 @@ import axios from 'axios';
 export default function AdminDashboard() {
     const [peers, setPeers] = useState([]);
     const [auditResult, setAuditResult] = useState(null);
-    const [leakContent, setLeakContent] = useState('');
-    const [leakResult, setLeakResult] = useState(null);
     const [isVerifying, setIsVerifying] = useState(false);
-    const [isDetecting, setIsDetecting] = useState(false);
     const [activeGraph, setActiveGraph] = useState('my');
     const [documents, setDocuments] = useState([]);
     const [selectedDoc, setSelectedDoc] = useState('');
@@ -106,14 +103,6 @@ export default function AdminDashboard() {
         finally { setIsVerifying(false); }
     };
 
-    const handleDetect = async (e) => {
-        e.preventDefault(); if (!leakContent) return;
-        setIsDetecting(true);
-        try { const res = await axios.post('/admin/detect-leak', { content: leakContent }); setLeakResult(res.data); }
-        catch { toast({ title: 'Detection failed', type: 'error' }); }
-        finally { setIsDetecting(false); }
-    };
-
     const selectFileForTrace = (doc) => {
         setSelectedDoc(doc.id);
         setSelectedDocName(doc.filename);
@@ -131,9 +120,9 @@ export default function AdminDashboard() {
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1 pb-8 overflow-y-auto pr-1">
+            <div className="flex flex-col gap-6 flex-1 pb-8 overflow-y-auto pr-1">
                 {/* Graph */}
-                <Card className={`flex flex-col transition-all duration-300 ${isFullscreen ? 'fixed inset-4 z-[100] shadow-2xl bg-black rounded-lg border border-white/[0.1]' : 'lg:col-span-2'}`}>
+                <Card className={`flex flex-col w-full min-h-[500px] lg:min-h-[600px] shrink-0 transition-all duration-300 ${isFullscreen ? 'fixed inset-4 z-[100] shadow-2xl bg-black rounded-lg border border-white/[0.1]' : ''}`}>
                     <CardHeader className="border-b border-white/[0.04] pb-4">
                         <div className="flex justify-between items-center">
                             <div>
@@ -228,11 +217,10 @@ export default function AdminDashboard() {
                     </CardContent>
                 </Card>
 
-                <div className="flex flex-col gap-4">
-
+                <div className="flex flex-col gap-4 shrink-0">
 
                     {/* Audit */}
-                    <Card className="overflow-visible">
+                    <Card className="overflow-visible flex flex-col w-full">
                         <CardHeader className="pb-2 relative">
                             <CardTitle className="text-sm flex items-center gap-2 group cursor-help w-max">
                                 <Shield className="h-3.5 w-3.5 text-white/60" /> Immutability Audit
@@ -247,60 +235,20 @@ export default function AdminDashboard() {
                             <CardDescription>Verify the hash chain integrity.</CardDescription>
                         </CardHeader>
                         <CardContent>
-                            <Button onClick={handleVerify} isLoading={isVerifying} className="w-full mb-3" variant="secondary">Validate Chain</Button>
+                            <Button onClick={handleVerify} isLoading={isVerifying} className="w-full md:w-auto px-8 mb-3" variant="secondary">Validate Chain</Button>
                             {auditResult && (
                                 <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-                                    className={`p-3 rounded-lg border flex items-start gap-2 backdrop-blur-xl transition-all duration-500 ${auditResult.valid ? 'border-emerald-500/30 bg-emerald-500/5 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10' : 'border-red-500/30 bg-red-500/5 shadow-[0_0_15px_rgba(255,7,58,0.15)] ring-1 ring-red-500/10'}`}>
-                                    {auditResult.valid ? <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" /> : <XCircle className="h-4 w-4 text-red-500 shrink-0" />}
+                                    className={`p-4 rounded-lg border flex items-start gap-3 backdrop-blur-xl transition-all duration-500 ${auditResult.valid ? 'border-emerald-500/30 bg-emerald-500/5 shadow-[0_0_15px_rgba(16,185,129,0.15)] ring-1 ring-emerald-500/10' : 'border-red-500/30 bg-red-500/5 shadow-[0_0_15px_rgba(255,7,58,0.15)] ring-1 ring-red-500/10'}`}>
+                                    {auditResult.valid ? <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
                                     <div>
-                                        <h4 className={`text-xs font-semibold ${auditResult.valid ? 'text-emerald-300' : 'text-red-400'}`}>{auditResult.valid ? 'Verified' : 'Tampered'}</h4>
-                                        <p className="text-[10px] text-gray-500 mt-0.5">{auditResult.chain_length} blocks.</p>
+                                        <h4 className={`text-sm font-semibold mb-0.5 ${auditResult.valid ? 'text-emerald-300' : 'text-red-400'}`}>{auditResult.valid ? 'Chain Integrity Verified' : 'Tampered Chain Detected'}</h4>
+                                        <p className="text-xs text-gray-400">Validated continuous history of {auditResult.chain_length} cryptographic blocks.</p>
                                     </div>
                                 </motion.div>
                             )}
                         </CardContent>
                     </Card>
 
-                    {/* Leak Detection */}
-                    <Card className="flex-1 overflow-visible">
-                        <CardHeader className="pb-2 relative">
-                            <CardTitle className="text-sm flex items-center gap-2 group cursor-help w-max">
-                                <Search className="h-3.5 w-3.5 text-red-500/60" /> Leak Detection
-                                <Info className="h-3 w-3 text-gray-500 group-hover:text-white transition-colors" />
-                                <div className="absolute top-10 left-6 right-6 p-4 bg-black/80 backdrop-blur-xl border border-white/[0.12] text-xs leading-relaxed text-gray-300 rounded-xl opacity-0 invisible translate-y-2 group-hover:opacity-100 group-hover:visible group-hover:translate-y-0 transition-all duration-300 ease-out z-[60] shadow-[0_12px_40px_rgba(0,0,0,0.6)] ring-1 ring-white/[0.02] pointer-events-none">
-                                    <div className="flex items-center gap-2 mb-1.5 text-white font-medium tracking-wide">
-                                        <Search className="h-3 w-3 text-red-500" /> Steganographic Analysis
-                                    </div>
-                                    Analyze leaked file contents. Extracts invisible zero-width character watermarks to trace the precise user who leaked the document.
-                                </div>
-                            </CardTitle>
-                            <CardDescription>Extract steganographic watermarks.</CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                            <form onSubmit={handleDetect} className="flex flex-col gap-2">
-                                <textarea
-                                    className="w-full h-20 bg-white/[0.03] border border-white/[0.06] rounded-lg p-2 text-xs text-white resize-none placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-red-500/30"
-                                    placeholder="Paste leaked content..."
-                                    value={leakContent} onChange={e => setLeakContent(e.target.value)} required
-                                />
-                                <Button type="submit" isLoading={isDetecting} variant="neon">Analyze</Button>
-                            </form>
-                            {leakResult && (
-                                <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-                                    className={`mt-3 p-3 rounded-lg border ${leakResult.leak_detected ? 'border-red-500/30 bg-red-500/5 shadow-[0_0_15px_rgba(255,7,58,0.1)]' : 'border-white/[0.06] bg-white/[0.02]'}`}>
-                                    {leakResult.leak_detected ? (
-                                        <>
-                                            <div className="flex items-center gap-1.5 text-red-500 font-semibold text-xs mb-1"><ShieldAlert className="h-3.5 w-3.5" /> Source Identified</div>
-                                            <div className="text-[10px] text-gray-400">Suspect: <span className="font-mono text-red-400">{leakResult.suspected_peer_id?.substring(0, 8)}</span></div>
-                                            <div className="text-[10px] text-gray-400 mt-0.5">Confidence: {(leakResult.confidence * 100).toFixed(1)}%</div>
-                                        </>
-                                    ) : (
-                                        <div className="flex items-center gap-1.5 text-gray-500 text-xs"><CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> No watermarks found.</div>
-                                    )}
-                                </motion.div>
-                            )}
-                        </CardContent>
-                    </Card>
                 </div>
             </div>
         </div>
