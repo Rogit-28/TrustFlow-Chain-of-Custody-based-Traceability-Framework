@@ -381,7 +381,13 @@ async def unlock_proposal(proposal_id: str, user: dict = Depends(get_current_use
         # ── Reconstruct from shares ──────────────────────────────────────
         share_objects = []
         for record in submitted_shares[: boardroom["threshold_m"]]:
-            share_objects.append(Share.from_dict(record["share_data"]))
+            raw = record["share_data"]
+            # asyncpg may return JSONB as a JSON string rather than a dict
+            if isinstance(raw, str):
+                import json as _json
+
+                raw = _json.loads(raw)
+            share_objects.append(Share.from_dict(raw))
 
         try:
             plaintext = reconstruct_secret(share_objects, hmac_key=None)

@@ -20,7 +20,10 @@ export default function BoardroomDetail() {
     const [newTitle, setNewTitle] = useState('');
     const [newContent, setNewContent] = useState('');
     const [enableTimelock, setEnableTimelock] = useState(false);
-    const [timelockMinutes, setTimelockMinutes] = useState(30);
+    const [tlHours, setTlHours] = useState(0);
+    const [tlMins, setTlMins] = useState(30);
+    const [tlSecs, setTlSecs] = useState(0);
+    const [tlPreset, setTlPreset] = useState('30m');
 
     const [unlockedDoc, setUnlockedDoc] = useState(null); // {title, content, watermarked, timelock_remaining_seconds}
 
@@ -56,8 +59,11 @@ export default function BoardroomDetail() {
                 title: newTitle,
                 content: newContent,
             };
-            if (enableTimelock && timelockMinutes > 0) {
-                payload.ttl_seconds = timelockMinutes * 60;
+            if (enableTimelock) {
+                const totalSecs = (tlHours * 3600) + (tlMins * 60) + tlSecs;
+                if (totalSecs >= 60) {
+                    payload.ttl_seconds = totalSecs;
+                }
             }
             await axios.post(`/boardrooms/${id}/proposals`, payload);
             toast({ title: 'Proposal Initiated', description: 'Document cryptographically split into shares.', type: 'success' });
@@ -65,7 +71,10 @@ export default function BoardroomDetail() {
             setNewTitle('');
             setNewContent('');
             setEnableTimelock(false);
-            setTimelockMinutes(30);
+            setTlHours(0);
+            setTlMins(30);
+            setTlSecs(0);
+            setTlPreset('30m');
             fetchData();
         } catch (err) {
             toast({ title: 'Error', description: err.response?.data?.detail || err.message, type: 'error' });
@@ -139,7 +148,7 @@ export default function BoardroomDetail() {
                         exit={{ opacity: 0, height: 0 }}
                         className="overflow-hidden"
                     >
-                        <Card className="bg-[#050505] border-white/[0.06] mb-6 shadow-2xl relative overflow-hidden">
+                        <Card className="bg-[#050505] border-white/[0.06] mb-6 shadow-2xl relative">
                             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-emerald-500/40 to-transparent" />
                             <CardContent className="p-6">
                                 <form onSubmit={handlePropose} className="space-y-4">
@@ -166,19 +175,28 @@ export default function BoardroomDetail() {
                                     </div>
 
                                     {/* Auto-Destruct Timer */}
-                                    <div className="border border-white/[0.06] rounded-lg p-4 bg-black/40">
+                                    <div className={`border rounded-lg p-4 transition-colors ${enableTimelock ? 'border-amber-500/30 bg-amber-500/[0.03]' : 'border-white/[0.06] bg-black/40'}`}>
                                         <div className="flex items-center justify-between">
-                                            <div className="flex items-center gap-2">
-                                                <Clock className="h-4 w-4 text-amber-400" />
-                                                <span className="text-xs font-medium text-gray-300">Auto-Destruct Timer</span>
-                                                <span className="text-[10px] text-gray-500 font-mono">(optional)</span>
+                                            <div className="flex items-center gap-2.5">
+                                                <div className={`p-1.5 rounded-md transition-colors ${enableTimelock ? 'bg-amber-500/15' : 'bg-white/5'}`}>
+                                                    <Clock className={`h-3.5 w-3.5 transition-colors ${enableTimelock ? 'text-amber-400' : 'text-gray-500'}`} />
+                                                </div>
+                                                <div>
+                                                    <span className={`text-xs font-medium transition-colors ${enableTimelock ? 'text-amber-300' : 'text-gray-400'}`}>Auto-Destruct</span>
+                                                    {enableTimelock && (
+                                                        <span className="text-[10px] text-amber-500/60 font-mono ml-2">
+                                                            {tlHours > 0 && `${tlHours}h `}{tlMins > 0 && `${tlMins}m `}{tlSecs > 0 && `${tlSecs}s`}
+                                                            {tlHours === 0 && tlMins === 0 && tlSecs === 0 && 'not set'}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                             <button
                                                 type="button"
                                                 onClick={() => setEnableTimelock(!enableTimelock)}
-                                                className={`relative w-10 h-5 rounded-full transition-colors ${enableTimelock ? 'bg-amber-500/60' : 'bg-white/10'}`}
+                                                className={`relative w-11 h-6 rounded-full transition-all duration-200 ${enableTimelock ? 'bg-amber-500/50 shadow-[0_0_12px_rgba(245,158,11,0.15)]' : 'bg-white/10'}`}
                                             >
-                                                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${enableTimelock ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                                <div className={`absolute top-1 w-4 h-4 rounded-full transition-all duration-200 ${enableTimelock ? 'translate-x-6 bg-amber-300 shadow-sm' : 'translate-x-1 bg-gray-500'}`} />
                                             </button>
                                         </div>
                                         <AnimatePresence>
@@ -187,21 +205,82 @@ export default function BoardroomDetail() {
                                                     initial={{ opacity: 0, height: 0 }}
                                                     animate={{ opacity: 1, height: 'auto' }}
                                                     exit={{ opacity: 0, height: 0 }}
+                                                    transition={{ duration: 0.2 }}
                                                     className="overflow-hidden"
                                                 >
-                                                    <div className="mt-3 flex items-center gap-3">
-                                                        <input
-                                                            type="number"
-                                                            min="1"
-                                                            value={timelockMinutes}
-                                                            onChange={(e) => setTimelockMinutes(Math.max(1, parseInt(e.target.value) || 1))}
-                                                            className="w-24 bg-black border border-amber-500/30 rounded-lg px-3 py-1.5 text-sm text-amber-400 focus:outline-none focus:border-amber-500/50 font-mono"
-                                                        />
-                                                        <span className="text-xs text-gray-400">minutes until content self-destructs</span>
+                                                    <div className="mt-4 space-y-3">
+                                                        {/* Preset buttons */}
+                                                        <div className="flex flex-wrap gap-1.5">
+                                                            {[
+                                                                { label: '5m', h: 0, m: 5, s: 0 },
+                                                                { label: '15m', h: 0, m: 15, s: 0 },
+                                                                { label: '30m', h: 0, m: 30, s: 0 },
+                                                                { label: '1h', h: 1, m: 0, s: 0 },
+                                                                { label: '6h', h: 6, m: 0, s: 0 },
+                                                                { label: '24h', h: 24, m: 0, s: 0 },
+                                                                { label: '72h', h: 72, m: 0, s: 0 },
+                                                            ].map((p) => (
+                                                                <button
+                                                                    key={p.label}
+                                                                    type="button"
+                                                                    onClick={() => { setTlHours(p.h); setTlMins(p.m); setTlSecs(p.s); setTlPreset(p.label); }}
+                                                                    className={`px-3 py-1 rounded text-[11px] font-mono font-medium transition-all
+                                                                        ${tlPreset === p.label
+                                                                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.1)]'
+                                                                            : 'bg-white/[0.04] text-gray-500 border border-white/[0.06] hover:bg-white/[0.08] hover:text-gray-300'
+                                                                        }`}
+                                                                >
+                                                                    {p.label}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+
+                                                        {/* Custom H:M:S input */}
+                                                        <div className="flex items-center gap-1">
+                                                            <div className="flex items-center bg-black/60 border border-white/[0.08] rounded-lg overflow-hidden">
+                                                                <div className="flex flex-col items-center px-2.5 py-1.5">
+                                                                    <span className="text-[8px] uppercase tracking-widest text-gray-600 mb-0.5">hrs</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        max="168"
+                                                                        value={tlHours}
+                                                                        onChange={(e) => { setTlHours(Math.max(0, parseInt(e.target.value) || 0)); setTlPreset(null); }}
+                                                                        className="w-10 bg-transparent text-center text-sm text-amber-400 font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                                    />
+                                                                </div>
+                                                                <span className="text-amber-500/40 text-sm font-mono">:</span>
+                                                                <div className="flex flex-col items-center px-2.5 py-1.5">
+                                                                    <span className="text-[8px] uppercase tracking-widest text-gray-600 mb-0.5">min</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        max="59"
+                                                                        value={tlMins}
+                                                                        onChange={(e) => { setTlMins(Math.min(59, Math.max(0, parseInt(e.target.value) || 0))); setTlPreset(null); }}
+                                                                        className="w-10 bg-transparent text-center text-sm text-amber-400 font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                                    />
+                                                                </div>
+                                                                <span className="text-amber-500/40 text-sm font-mono">:</span>
+                                                                <div className="flex flex-col items-center px-2.5 py-1.5">
+                                                                    <span className="text-[8px] uppercase tracking-widest text-gray-600 mb-0.5">sec</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        max="59"
+                                                                        value={tlSecs}
+                                                                        onChange={(e) => { setTlSecs(Math.min(59, Math.max(0, parseInt(e.target.value) || 0))); setTlPreset(null); }}
+                                                                        className="w-10 bg-transparent text-center text-sm text-amber-400 font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            <span className="text-[10px] text-gray-600 ml-2">until self-destruct</span>
+                                                        </div>
+
+                                                        <p className="text-[10px] text-amber-500/40 font-mono leading-relaxed">
+                                                            Encryption key destroyed on expiry. Document becomes permanently unrecoverable.
+                                                        </p>
                                                     </div>
-                                                    <p className="text-[10px] text-amber-500/60 mt-2 font-mono">
-                                                        After this timer elapses, the encryption key is destroyed and the document becomes permanently unrecoverable.
-                                                    </p>
                                                 </motion.div>
                                             )}
                                         </AnimatePresence>
