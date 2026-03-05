@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { useToast } from '../components/ui/toast';
-import { Users, Plus, ShieldCheck, ChevronRight } from 'lucide-react';
+import { Users, Plus, ShieldCheck, ChevronRight, Activity } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
@@ -66,81 +66,88 @@ export default function BoardroomView() {
 
     return (
         <div className="h-full flex flex-col space-y-6 lg:space-y-8">
+            {/* Header */}
             <div className="flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-3">
-                    <Users className="h-7 w-7 text-emerald-500" />
-                    <div>
-                        <h1 className="text-2xl font-display font-bold text-white tracking-tight">Inner Circle</h1>
-                        <p className="text-gray-500 text-sm mt-0.5">High-security boardrooms utilizing Shamir's Secret Sharing.</p>
-                    </div>
+                <div>
+                    <h1 className="text-2xl font-display font-bold text-white tracking-tight flex items-center gap-2">
+                        <Users className="h-6 w-6 text-gray-500" /> Inner Circle
+                    </h1>
+                    <p className="text-gray-600 text-sm mt-0.5">Threshold-secured boardrooms with Shamir's Secret Sharing.</p>
                 </div>
-                <Button onClick={() => setIsCreating(!isCreating)} variant="neon" className="px-4">
-                    {isCreating ? 'Cancel' : <><Plus className="h-4 w-4 mr-2" /> New Boardroom</>}
+                <Button onClick={() => setIsCreating(!isCreating)} variant="neon" className="gap-2">
+                    {isCreating ? 'Cancel' : <><Plus className="h-4 w-4" /> New Boardroom</>}
                 </Button>
             </div>
 
+            {/* Create Form */}
             <AnimatePresence>
                 {isCreating && (
                     <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
+                        initial={{ opacity: 0, height: 0, y: -20 }}
+                        animate={{ opacity: 1, height: 'auto', y: 0 }}
+                        exit={{ opacity: 0, height: 0, y: -20 }}
+                        transition={{ duration: 0.3, ease: "easeOut" }}
                         className="overflow-hidden"
                     >
-                        <Card className="bg-[#050505] border-white/[0.06] shadow-xl relative mt-4">
-                            <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 blur-3xl pointer-events-none rounded-full translate-x-1/4 -translate-y-1/4" />
-                            <CardHeader className="pb-4">
-                                <CardTitle className="text-lg flex items-center gap-2">
-                                    <ShieldCheck className="h-5 w-5 text-emerald-500" /> Configure Threshold Execution
+                        <Card className="bg-[#050505] border-white/[0.06] relative">
+                            <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-red-500/30 to-transparent" />
+
+                            <CardHeader className="pb-4 border-b border-white/[0.04]">
+                                <CardTitle className="text-base flex items-center gap-2">
+                                    <ShieldCheck className="h-4 w-4 text-red-500" /> Initialize Secure Vault
                                 </CardTitle>
                                 <CardDescription>
-                                    Any execution documents uploaded to this boardroom will be cryptographically split. They can only be rebuilt if the threshold M of N is met.
+                                    Execution documents will be cryptographically split. M-of-N threshold required for reconstruction.
                                 </CardDescription>
                             </CardHeader>
-                            <CardContent>
-                                <form onSubmit={handleCreate} className="space-y-4">
-                                    <div>
-                                        <label className="text-xs font-medium text-gray-400 mb-1 block">Boardroom Name</label>
-                                        <input
-                                            type="text"
-                                            value={newName}
-                                            onChange={(e) => setNewName(e.target.value)}
-                                            className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50"
-                                            required
-                                            placeholder="e.g. Project Orion Executives"
-                                        />
+                            <CardContent className="pt-6">
+                                <form onSubmit={handleCreate} className="space-y-5">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                        <div className="space-y-1.5">
+                                            <label className="text-xs text-gray-400 block">Vault Name</label>
+                                            <input
+                                                type="text"
+                                                value={newName}
+                                                onChange={(e) => setNewName(e.target.value)}
+                                                className="w-full bg-[#0a0a0a] border border-white/[0.08] rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-red-500/40 focus:ring-1 focus:ring-red-500/30 shadow-inner transition-colors placeholder:text-gray-700"
+                                                required
+                                                placeholder="e.g. Project Orion Executives"
+                                            />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-xs text-gray-400 block">Approval Threshold (M)</label>
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="number"
+                                                    min="2"
+                                                    value={newThreshold}
+                                                    onChange={(e) => setNewThreshold(e.target.value)}
+                                                    className="w-24 bg-[#0a0a0a] border border-white/[0.08] rounded-lg px-4 py-2.5 text-center text-white font-mono text-lg focus:outline-none focus:border-red-500/40 focus:ring-1 focus:ring-red-500/30 shadow-inner"
+                                                    required
+                                                />
+                                                <span className="text-xs text-gray-500">
+                                                    of <span className="text-gray-300 font-bold">{newMembers.split(',').filter(Boolean).length + 1}</span> members required to unlock
+                                                </span>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <label className="text-xs font-medium text-gray-400 mb-1 block">Member Usernames (excluding you)</label>
+                                    <div className="space-y-1.5">
+                                        <label className="text-xs text-gray-400 block">Keyholders (excluding you)</label>
                                         <input
                                             type="text"
                                             value={newMembers}
                                             onChange={(e) => setNewMembers(e.target.value)}
-                                            className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 font-mono"
+                                            className="w-full bg-[#0a0a0a] border border-white/[0.08] rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-red-500/40 focus:ring-1 focus:ring-red-500/30 font-mono shadow-inner transition-colors placeholder:text-gray-700"
                                             required
-                                            placeholder="user2, user3"
+                                            placeholder="agent_alpha, root_sec"
                                         />
-                                        <p className="text-[10px] text-gray-500 mt-1">Comma-separated exact usernames. You will automatically be included.</p>
+                                        <p className="text-[10px] text-gray-600 mt-1.5">
+                                            Comma-separated usernames. You will automatically be included.
+                                        </p>
                                     </div>
-                                    <div className="flex gap-4 items-center">
-                                        <div className="w-1/3">
-                                            <label className="text-xs font-medium text-gray-400 mb-1 block">Approval Threshold (M)</label>
-                                            <input
-                                                type="number"
-                                                min="2"
-                                                value={newThreshold}
-                                                onChange={(e) => setNewThreshold(e.target.value)}
-                                                className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50"
-                                                required
-                                            />
-                                        </div>
-                                        <div className="flex-1 text-xs text-gray-500 pt-5">
-                                            Out of the {newMembers.split(',').filter(Boolean).length + 1} total members, <strong>{newThreshold}</strong> must approve proposals to unlock them.
-                                        </div>
-                                    </div>
-                                    <div className="flex justify-end pt-4 border-t border-white/[0.04]">
-                                        <Button type="submit" variant="neon" className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
-                                            Initialize Secure Vault
+                                    <div className="flex justify-end pt-2">
+                                        <Button type="submit" variant="neon" className="px-6">
+                                            Generate Vault & Distribute Keys
                                         </Button>
                                     </div>
                                 </form>
@@ -150,42 +157,54 @@ export default function BoardroomView() {
                 )}
             </AnimatePresence>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {isLoading ? (
-                    <div className="col-span-full py-20 flex justify-center opacity-50">
-                        <div className="h-8 w-8 rounded-full border-2 border-emerald-500/20 border-t-emerald-500 animate-spin" />
-                    </div>
-                ) : boardrooms.length === 0 ? (
-                    <div className="col-span-full py-20 text-center text-gray-500 text-sm">
-                        You are not a member of any Inner Circle boardrooms.
-                    </div>
-                ) : (
-                    (boardrooms || []).map((br) => (
-                        <Card
-                            key={br.id}
-                            onClick={() => navigate(`/boardroom/${br.id}`)}
-                            className="bg-[#050505] border-white/[0.06] hover:border-emerald-500/30 transition-colors cursor-pointer group"
-                        >
-                            <CardHeader className="pb-2">
-                                <CardTitle className="text-base text-gray-200 group-hover:text-emerald-400 transition-colors truncate">
-                                    {br.name}
-                                </CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <div className="flex items-center justify-between text-xs text-gray-500">
-                                    <div className="flex items-center gap-1.5">
-                                        <Users className="h-3.5 w-3.5" />
-                                        {br.total_members} members
+            {/* Boardroom Grid */}
+            {isLoading ? (
+                <div className="flex-1 flex items-center justify-center">
+                    <Activity className="h-6 w-6 text-gray-600 animate-spin" />
+                </div>
+            ) : boardrooms.length === 0 ? (
+                <div className="flex flex-col items-center justify-center p-16 border border-white/[0.04] bg-white/[0.01] rounded-xl border-dashed">
+                    <Users className="h-10 w-10 text-gray-700 mb-3" />
+                    <p className="text-gray-600 text-sm">No active boardrooms. Create one to get started.</p>
+                </div>
+            ) : (
+                <motion.div
+                    className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"
+                    initial="hidden" animate="visible"
+                    variants={{ hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.04 } } }}
+                >
+                    {(boardrooms || []).map((br) => (
+                        <motion.div key={br.id} variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}>
+                            <Card
+                                onClick={() => navigate(`/boardroom/${br.id}`)}
+                                className="group cursor-pointer border-white/[0.04] bg-[#050505] hover:bg-[#0a0a0a] hover:border-white/[0.12] hover:-translate-y-1 hover:shadow-[0_12px_40px_-10px_rgba(0,0,0,0.8)] transition-all duration-300 relative h-full flex flex-col border-l-2 border-l-red-500/20"
+                            >
+                                <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent group-hover:via-red-500/40 transition-colors duration-500" />
+                                <CardContent className="p-4 flex-1 flex flex-col">
+                                    <div className="flex justify-between items-start mb-3">
+                                        <div className="p-1.5 bg-white/[0.04] rounded-md">
+                                            <Users className="h-5 w-5 text-gray-500" />
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border text-white/60 border-white/10 bg-white/[0.04] font-mono">
+                                                {br.threshold_m}/{br.total_members}
+                                            </span>
+                                        </div>
                                     </div>
-                                    <div className="bg-white/5 py-1 px-2 rounded flex items-center gap-1 font-mono text-[10px]">
-                                        M-of-N: <span className="text-white">{br.threshold_m}/{br.total_members}</span>
+                                    <h3 className="font-medium text-sm text-gray-200 truncate mb-1">{br.name}</h3>
+                                    <div className="text-[10px] text-gray-500 mb-3 flex items-center gap-1">
+                                        <Users className="h-3 w-3 text-gray-600" />{br.total_members} keyholders
                                     </div>
+                                </CardContent>
+                                <div className="border-t border-white/[0.04] bg-black/40 p-2 flex items-center justify-between px-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                                    <span className="text-[10px] text-gray-600">Enter boardroom</span>
+                                    <ChevronRight className="h-3.5 w-3.5 text-gray-600 group-hover:text-white group-hover:translate-x-0.5 transition-all" />
                                 </div>
-                            </CardContent>
-                        </Card>
-                    ))
-                )}
-            </div>
+                            </Card>
+                        </motion.div>
+                    ))}
+                </motion.div>
+            )}
         </div>
     );
 }
